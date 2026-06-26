@@ -1,0 +1,30 @@
+# ========================
+# macOS
+# ========================
+.DS_Store
+
+# ========================
+# Backend (Python / FastAPI)
+# ========================
+.venv/
+__pycache__/
+*.py[cod]
+*.so
+.env
+
+# ========================
+# Frontend (Node / React)
+# ========================
+node_modules/
+dist/
+npm-debug.log*
+.env.local
+
+# ========================
+# Infrastructure (Terraform)
+# ========================
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+.terraform.lock.hcl
