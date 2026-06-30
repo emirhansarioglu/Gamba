@@ -1,34 +1,31 @@
+import os
 import bcrypt
 from datetime import datetime, timedelta
-from jose import jwt
+from jose import jwt, JWTError
 
-# Security Configuration
-SECRET_KEY = "gamba_super_secret_prototype_key"
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "gamba_super_secret_prototype_key")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
+
 def hash_password(password: str) -> str:
-    """Takes a plain text password and returns a securely hashed version."""
-    # Bcrypt requires bytes, so we encode the string first
-    pwd_bytes = password.encode('utf-8')
-    salt = bcrypt.gensalt()
-    hashed_bytes = bcrypt.hashpw(pwd_bytes, salt)
-    
-    # Decode back to a string so SQLAlchemy can save it in the database
-    return hashed_bytes.decode('utf-8')
+    pwd_bytes = password.encode("utf-8")
+    hashed = bcrypt.hashpw(pwd_bytes, bcrypt.gensalt())
+    return hashed.decode("utf-8")
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Checks if a provided password matches the hash stored in the DB."""
-    plain_bytes = plain_password.encode('utf-8')
-    hashed_bytes = hashed_password.encode('utf-8')
-    
-    return bcrypt.checkpw(plain_bytes, hashed_bytes)
 
-def create_access_token(data: dict):
-    """Creates a signed JSON Web Token (JWT) containing user info."""
+def verify_password(plain: str, hashed: str) -> bool:
+    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+
+
+def create_access_token(data: dict) -> str:
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    to_encode["exp"] = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_token(token: str):
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
