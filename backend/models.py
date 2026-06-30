@@ -10,7 +10,7 @@ class User(Base):
     role = Column(String(20), nullable=False)
     created_at = Column(DateTime, server_default=text('NOW()'))
 
-class Event(Base):
+class dbEvent(Base):    # since we use from threading import Thread, Event in worker_queue.py, I changed the naming.
     __tablename__ = "events"
 
     id = Column(Integer, primary_key=True, index=True)
