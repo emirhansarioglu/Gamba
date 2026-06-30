@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, text
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, text
 from database import Base
 
 class User(Base):
@@ -22,3 +22,11 @@ class Event(Base):
     capacity = Column(Integer, nullable=False)
     joined_count = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, server_default=text('NOW()'))
+
+
+class EventParticipation(Base):
+    __tablename__ = "event_participations"
+
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+    event_id = Column(Integer, ForeignKey("events.id"), primary_key=True)
+    joined_at = Column(DateTime, server_default=text('NOW()'))
