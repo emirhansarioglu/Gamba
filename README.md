@@ -420,7 +420,7 @@ docker compose -f docker-compose.dev.yml up -d
 ```bash
 cd backend
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate     # for macOS, for Windows use .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 uvicorn main:app --reload   # starts on http://localhost:8000
 ```
@@ -433,6 +433,39 @@ npm install
 npm run dev   # starts on http://localhost:5173
 ```
 
+### 12. Postgress GUI setup
+
+Pg Admin for postgres runs on http://localhost:5050/
+enter the following data:
+login:
+admin@example.com
+password:
+admin
+
+In the top left corner right click on Servers and select: 
+
+Register -> Server
+
+In the General tab fill in:
+
+Name: gamba-postgres
+
+In the Connection tab fill in:
+
+Host name/address: postgres        # since the pg admin runs inside docker, otherwise enter localhost
+Port:              5432
+Maintenance DB:    gamba
+Username:          gamba
+Password:          gamba
+
+Servers -> gamba-postgres -> Databases -> righ click on gamba and select Query Tool
+
+In the opened window you can execute for example:
+
+```bash
+SELECT * FROM public.events
+```
+To get all events in the database. (post them over http://127.0.0.1:8000/docs#/default/post_event_event_post and click Try it out)
 ### Quick verification checklist
 
 ```bash
