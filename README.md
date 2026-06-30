@@ -7,45 +7,47 @@ Gamba is a web-only sports venue booking application. Players can browse and joi
 
 ---
 
-## Tech Stack
+## Assignment Requirements Mapping
 
-| Layer | Choice |
-|---|---|
-| Frontend | React + Vite (web only, served as static files) |
-| Backend | Python FastAPI |
-| Database | PostgreSQL (single node, not scaled) |
-| Cache | Redis (single node) |
-| Load Balancer | Nginx (manual round-robin in front of backend nodes) |
-| Infrastructure | Terraform on GCP Compute Engine |
-| Load Testing | K6 |
+| # | Requirement | Implementation |
+|---|---|---|
+| 1 | Stateless + stateful separation | FastAPI nodes are fully stateless; all state lives in PostgreSQL (persistent) and Redis (cache) |
+| 2 | Scale 1 → 3 → 5 nodes | `backend_node_count` Terraform variable; Nginx round-robins across nodes |
+| 3 | Overload mitigation (no library) | Hand-rolled **token bucket rate limiter** in `middleware/rate_limiter.py` — no library used |
+| 4a | Additional strategy 1 | **Redis read-through cache** on `GET /events`, 30s TTL, invalidated on writes |
+| 4b | Additional strategy 2 | **Prometheus observability** — `/metrics` endpoint with request counters, latency histograms, cache hit/miss counters |
+| Bonus | Vertical scaling evaluation | Re-run load tests on `e2-medium` vs `e2-standard-2` for 1/3/5 node configs |
 
 ---
 
 ## Architecture
 
 ```
-[React Frontend — static files served by Nginx]
+[React Frontend — static files served by Nginx LB]
                     |
-         [Nginx Load Balancer VM]
+         [Infra VM: Nginx + PostgreSQL + Redis]   ← public IP, port 80
           /          |          \
-    [FastAPI]    [FastAPI]    [FastAPI]   ← 1 / 3 / 5 nodes (scaled component)
+    [FastAPI]    [FastAPI]    [FastAPI]   ← 1 / 3 / 5 nodes, port 8000 (internal)
           \          |          /
-           [PostgreSQL VM]   [Redis VM]
+           [PostgreSQL]       [Redis]     ← both on the infra VM, internal only
 ```
 
-Backend nodes are **stateless** — they hold no local state between requests. All persistent state lives in PostgreSQL. Redis is a shared cache layer. This satisfies the stateless/stateful separation requirement.
+**Stateless components:** FastAPI backend nodes — no local state between requests, safe to add/remove at any time.  
+**Stateful components:** PostgreSQL (source of truth), Redis (shared cache).
 
 ---
 
-## Scalability Requirements Mapping
+## Tech Stack
 
-| # | Requirement | Implementation |
-|---|---|---|
-| 1 | Stateless + stateful separation | FastAPI nodes = stateless; PostgreSQL = stateful |
-| 2 | Scale 1 → 3 → 5 nodes | `backend_node_count` Terraform variable; Nginx round-robins across nodes |
-| 3 | Overload mitigation | Hand-rolled **token bucket rate limiter** as FastAPI middleware (no library) |
-| 4a | Additional strategy 1 | **Redis caching** — cache `GET /events` responses, 30s TTL, invalidated on writes |
-| 4b | Additional strategy 2 | **Observability** — Prometheus `/metrics` endpoint + structured JSON logging |
+| Layer | Choice |
+|---|---|
+| Frontend | React + Vite (minimal UI, served as static files by Nginx) |
+| Backend | Python FastAPI |
+| Database | PostgreSQL 16 (single node, not scaled) |
+| Cache | Redis 7 (single node) |
+| Load Balancer | Nginx (manual round-robin) |
+| Infrastructure | Terraform on GCP Compute Engine |
+| Load Testing | K6 |
 
 ---
 
@@ -57,36 +59,39 @@ gamba/
 │   ├── src/
 │   │   ├── main.jsx
 │   │   ├── App.jsx
-│   │   ├── pages/
-│   │   │   ├── Login.jsx             # Username/password + role selector + register toggle
-│   │   │   ├── OrganizerView.jsx     # Create event form
-│   │   │   └── PlayerView.jsx        # Browse + join events
-│   │   └── api.js                    # Axios wrapper with JWT header injection
+│   │   ├── api.js                    # Axios instance with JWT interceptor
+│   │   └── pages/
+│   │       ├── Login.jsx             # Register / login, role selector
+│   │       ├── OrganizerView.jsx     # Create event form
+│   │       └── PlayerView.jsx        # Browse + join events
 │   ├── index.html
+│   ├── .env.example
 │   └── package.json
 ├── backend/
-│   ├── main.py                       # FastAPI app, CORS, lifespan hooks
+│   ├── main.py                       # FastAPI app, CORS, middleware, routers
 │   ├── routers/
-│   │   ├── auth.py                   # /register, /login
-│   │   └── events.py                 # CRUD routes
+│   │   ├── auth.py                   # POST /api/auth/register, POST /api/auth/login
+│   │   └── events.py                 # GET/POST /api/events, POST /api/events/{id}/join
 │   ├── middleware/
-│   │   └── rate_limiter.py           # Token bucket, in-memory per IP
-│   ├── auth_utils.py                 # bcrypt verify, JWT encode/decode
+│   │   └── rate_limiter.py           # Hand-rolled token bucket per IP
+│   ├── auth_utils.py                 # bcrypt hashing, JWT encode/decode
 │   ├── cache.py                      # Redis get/set/delete helpers
 │   ├── metrics.py                    # Prometheus counters + histograms
-│   ├── database.py                   # SQLAlchemy engine + session
+│   ├── database.py                   # SQLAlchemy engine + session (env-var config)
 │   ├── models.py                     # SQLAlchemy ORM models
 │   ├── schemas.py                    # Pydantic request/response schemas
+│   ├── .env.example
 │   └── requirements.txt
 ├── infrastructure/
 │   ├── main.tf                       # VMs, VPC, firewall rules
 │   ├── variables.tf                  # backend_node_count, machine_type, region
-│   ├── nginx.conf.tpl                # Nginx upstream template (filled by Terraform)
-│   └── outputs.tf
+│   ├── nginx.conf.tpl                # Nginx upstream template (IPs injected by Terraform)
+│   └── outputs.tf                    # LB public IP, backend IPs
 ├── scripts/
-│   ├── bootstrap.sh                  # Install Python, Node, Nginx, etc. on a fresh VM
-│   ├── deploy.sh                     # Build frontend, push code, restart services on all VMs
-│   └── load_test.js                  # K6 script
+│   ├── bootstrap.sh                  # Install deps on a fresh GCP VM
+│   ├── deploy.sh                     # Build frontend, push code, restart services
+│   └── load_test.js                  # K6 load test script
+├── docker-compose.dev.yml            # Local PostgreSQL + Redis for development
 └── README.md
 ```
 
@@ -94,18 +99,16 @@ gamba/
 
 ## Data Model
 
-### `users` table
-
+### `users`
 ```
 id           SERIAL PRIMARY KEY
 username     VARCHAR(100) UNIQUE NOT NULL
-password     VARCHAR(255) NOT NULL          -- bcrypt hash, never stored plain
+password     VARCHAR(255) NOT NULL          -- bcrypt hash
 role         VARCHAR(20) NOT NULL           -- 'player' | 'organizer'
 created_at   TIMESTAMP DEFAULT NOW()
 ```
 
-### `events` table
-
+### `events`
 ```
 id           SERIAL PRIMARY KEY
 city         VARCHAR(100) NOT NULL
@@ -114,29 +117,17 @@ sport        VARCHAR(50) NOT NULL
 level        INTEGER NOT NULL               -- 1 to 5
 event_time   TIMESTAMP NOT NULL
 capacity     INTEGER NOT NULL
-joined_count INTEGER NOT NULL DEFAULT 0
+joined_count INTEGER NOT NULL DEFAULT 0     -- denormalized counter, kept in sync with event_participations
 created_at   TIMESTAMP DEFAULT NOW()
 ```
 
----
-
-## Authentication
-
-### Flow
-
-1. A new user hits the login screen, toggles to "Register", fills in username, password, and selects a role (Player or Organizer), and submits.
-2. The backend hashes the password with bcrypt and stores the user row.
-3. On login, the backend verifies the bcrypt hash and returns a **JWT** containing `{user_id, username, role}`.
-4. The frontend stores the JWT in `localStorage` and injects it as `Authorization: Bearer <token>` on every subsequent request via an Axios interceptor.
-5. Protected endpoints decode the JWT, verify the signature, and check the role. No session state is held on the server.
-
-### Authorization Rules
-
-| Endpoint | Allowed roles |
-|---|---|
-| `GET /api/events` | player, organizer |
-| `POST /api/events` | organizer only (403 otherwise) |
-| `POST /api/events/{id}/join` | player only (403 otherwise) |
+### `event_participations`
+```
+user_id      INTEGER NOT NULL REFERENCES users(id)
+event_id     INTEGER NOT NULL REFERENCES events(id)
+joined_at    TIMESTAMP DEFAULT NOW()
+PRIMARY KEY (user_id, event_id)             -- composite PK; a user can join an event at most once
+```
 
 ---
 
@@ -144,10 +135,10 @@ created_at   TIMESTAMP DEFAULT NOW()
 
 ```
 GET  /health
-     → {status: "ok", node_id: "<hostname>"}
+     → {status: "ok", node_id: "<hostname>"}   -- hostname changes per node (proves round-robin)
 
 GET  /metrics
-     → Prometheus text format (no auth required)
+     → Prometheus text format
 
 POST /api/auth/register
      body: {username, password, role}
@@ -158,6 +149,7 @@ POST /api/auth/login
      → 200 {access_token, role}
 
 GET  /api/events?city=X&sport=Y&day=YYYY-MM-DD
+     auth: JWT required (player or organizer)
      → cached in Redis (key = "events:{city}:{sport}:{day}", TTL 30s)
      → list of event objects
 
@@ -165,128 +157,171 @@ POST /api/events
      auth: organizer JWT required
      body: {city, address, sport, level, event_time, capacity}
      → 201 event object
-     → invalidates Redis keys matching city/sport/day of the new event
+     → invalidates Redis key for that city/sport/day
 
 POST /api/events/{id}/join
      auth: player JWT required
      → 200 {joined_count, capacity}
-     → 409 if event is full
-     → invalidates Redis key for that event's city/sport/day
-
-POST /api/auth/register   body: {username, password, role}   → 201 {username, role}
-
-POST /api/auth/login      body: {username, password}         → 200 {access_token, role}
+     → 409 "Already joined this event" if the player already joined
+     → 409 "Event is full" if joined_count >= capacity
+     → records a row in event_participations and invalidates the Redis key
 ```
 
 ---
 
-## Frontend Screens
+## Scalability Strategies
 
-### Login (`/`)
+### Req 3 — Token Bucket Rate Limiter (hand-rolled, no library)
 
-- Toggle between **Login** and **Register**
-- Register: username, password, role selector (Player | Organizer)
-- Login: username, password
-- On success: JWT + role stored, routed to the correct dashboard
+`middleware/rate_limiter.py` — Starlette middleware:
+- **Algorithm:** Token bucket, one bucket per IP address, stored in-memory dict
+- **Bucket size:** 60 tokens
+- **Refill rate:** 1 token/second
+- **On empty bucket:** return `429 Too Many Requests`
+- Increments `gamba_rate_limited_total` Prometheus counter on each 429
 
-### Organizer Dashboard (`/organizer`)
+**Known limitation (documented):** Each backend node maintains its own in-memory bucket. A client can make 60 req/s × N nodes before hitting the limit. A production system would use a shared Redis counter. This is an intentional known trade-off, documented for the presentation.
 
-Form fields:
-- **City**: dropdown of ~20 European cities (Berlin, Paris, Amsterdam, Madrid, Rome, etc.)
-- **Address**: free text input
-- **Sport**: scrollable select — Football, Basketball, Tennis, Volleyball, Badminton
-- **Level**: scrollable select — 1, 2, 3, 4, 5
-- **Time**: scrollable select — one slot per hour for the next 3 days (72 options)
-- **Capacity**: scrollable select — 2 to 50
+### Req 4a — Redis Read-Through Cache
 
-Submit → `POST /api/events` → success toast shown.
-
-### Player Dashboard (`/player`)
-
-- Filter bar: city dropdown, sport dropdown, day picker (today / tomorrow / day after)
-- Calls `GET /api/events` on filter change
-- Event cards show: sport badge, address, level badge, time, "X spots left"
-- **Join** button → `POST /api/events/{id}/join` → spots count updates in place
-- Button disabled and labeled "Full" when `joined_count >= capacity`
-
----
-
-## Rate Limiter (Requirement #3)
-
-Implemented in `middleware/rate_limiter.py` as a Starlette middleware:
-
-- **Algorithm**: Token bucket per IP address
-- **Bucket size**: 60 tokens
-- **Refill rate**: 1 token per second
-- **On request**: consume 1 token; if bucket is empty → return `429 Too Many Requests`
-- **Storage**: in-memory dict (per-process) — nodes do not share rate limit state; this is a documented known limitation
-- A Prometheus counter is incremented on each 429 response
-
----
-
-## Redis Caching (Requirement #4a)
-
-Implemented in `cache.py`:
-
-- Cache key format: `events:{city}:{sport}:{day}`
+`cache.py`:
+- Cache key: `events:{city}:{sport}:{day}`
 - TTL: 30 seconds
-- `GET /api/events` → check Redis → **hit**: return cached JSON; **miss**: query PostgreSQL, store in Redis, return result
-- `POST /api/events` (create) and `POST /api/events/{id}/join` → delete the matching Redis key
+- Read: check Redis → hit: return cached JSON; miss: query PostgreSQL, store in Redis
+- Write (`POST /events`, `POST /events/{id}/join`): delete matching Redis key
 - Prometheus counters: `gamba_cache_hits_total`, `gamba_cache_misses_total`
 
----
+### Req 4b — Prometheus Observability
 
-## Observability (Requirement #4b)
-
-### Prometheus Metrics (`/metrics`)
-
-Exposed via `metrics.py`:
-
+`metrics.py`:
 ```
-gamba_requests_total{method, endpoint, status}     -- request counter
-gamba_request_duration_seconds{endpoint}           -- response time histogram
-gamba_cache_hits_total                             -- Redis cache hits
-gamba_cache_misses_total                           -- Redis cache misses
-gamba_rate_limited_total                           -- 429 responses served
+gamba_requests_total{method, endpoint, status}
+gamba_request_duration_seconds{endpoint}
+gamba_cache_hits_total
+gamba_cache_misses_total
+gamba_rate_limited_total
 ```
-
-### Structured Logging
-
-Python `logging` with a custom JSON formatter outputs one line per request:
-
-```json
-{"timestamp": "...", "level": "INFO", "node_id": "backend-1", "method": "GET", "path": "/api/events", "status": 200, "duration_ms": 12}
-```
+Exposed at `GET /metrics` in Prometheus text format. No auth required (internal network only in production).
 
 ---
 
-## Infrastructure (Terraform)
+## Authentication
 
-### Key Variables
+1. Register: `POST /api/auth/register` → bcrypt hash stored, JWT returned on login
+2. Login: `POST /api/auth/login` → JWT `{user_id, username, role}` returned
+3. Frontend stores JWT in `localStorage`, injects as `Authorization: Bearer <token>` via Axios interceptor
+4. Backend decodes JWT on protected routes, checks role
 
-```hcl
-variable "backend_node_count" { default = 1 }   // set to 1, 3, or 5
-variable "machine_type"        { default = "e2-medium" }
-variable "region"              { default = "europe-west3" }  // Frankfurt
+No session state on server — nodes are fully stateless.
+
+---
+
+## Frontend (Minimal)
+
+Three screens:
+- **`/`** — Login / Register toggle with role selector (Player | Organizer)
+- **`/organizer`** — Form to create an event (city, address, sport, level, time, capacity)
+- **`/player`** — Filter bar + event cards with Join button; spots update in-place
+
+The frontend is intentionally minimal — the focus of this project is backend scalability, not UX.
+
+---
+
+## Local Development
+
+### Prerequisites
+- Docker Desktop (for local PostgreSQL + Redis)
+- Node.js 20+ (via nvm)
+- Python 3.11+
+
+### Start local services
+```bash
+docker compose -f docker-compose.dev.yml up -d
 ```
 
-### Resources
+### Backend
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env          # edit if needed
+uvicorn main:app --reload     # http://localhost:8000
+```
 
-| VM | Count | Purpose |
-|---|---|---|
-| `nginx-lb` | 1 | Nginx load balancer, public IP |
-| `backend-N` | 1 / 3 / 5 | FastAPI app servers |
-| `postgres-db` | 1 | PostgreSQL database |
-| `redis-cache` | 1 | Redis cache |
+### Frontend
+```bash
+cd frontend
+npm install
+cp .env.example .env          # VITE_API_URL=http://localhost:8000
+npm run dev                   # http://localhost:5173
+```
 
-### Firewall Rules
+---
 
-- Port 80: public → `nginx-lb`
-- Port 8000: `nginx-lb` → `backend-*` (internal only)
-- Port 5432: `backend-*` → `postgres-db` (internal only)
-- Port 6379: `backend-*` → `redis-cache` (internal only)
+## Remote Deployment (GCP)
 
-Nginx config is generated from `nginx.conf.tpl` with backend VM IPs injected by Terraform. `deploy.sh` runs `terraform apply -var backend_node_count=N`, then SSHs into each VM to pull the latest code and restart the FastAPI service.
+### Prerequisites
+- Terraform installed (`brew install hashicorp/tap/terraform`)
+- Google Cloud SDK installed and authenticated:
+  ```bash
+  gcloud init
+  gcloud auth application-default login
+  ```
+- A GCP project with Compute Engine API enabled
+- An SSH key pair (default: `~/.ssh/id_rsa` / `~/.ssh/id_rsa.pub`)
+
+### 1. Provision infrastructure
+```bash
+cd infrastructure
+
+# Single node (default)
+terraform init
+terraform apply -var="project_id=YOUR_GCP_PROJECT_ID"
+
+# 3-node cluster
+terraform apply -var="project_id=YOUR_GCP_PROJECT_ID" -var="backend_node_count=3"
+
+# 5-node cluster
+terraform apply -var="project_id=YOUR_GCP_PROJECT_ID" -var="backend_node_count=5"
+```
+
+Terraform creates:
+- 1 `infra` VM (public IP) — runs Nginx, PostgreSQL, and Redis
+- N `backend-*` VMs (internal only, port 8000)
+- Firewall rules: port 80 public → infra; port 8000/5432/6379 internal only
+
+### 2. Bootstrap VMs
+```bash
+# Run once per VM type after provisioning
+bash scripts/bootstrap.sh infra infra
+bash scripts/bootstrap.sh backend-1 backend
+# repeat for backend-2, backend-3, etc.
+```
+
+### 3. Deploy application
+```bash
+# Pass the LB public IP so the frontend build bakes in the correct API URL
+LB_IP=$(terraform -chdir=infrastructure output -raw lb_ip)
+bash scripts/deploy.sh $LB_IP
+```
+
+`deploy.sh` does:
+1. Builds frontend with `VITE_API_URL=http://$LB_IP`
+2. Copies static files to Nginx on the LB VM
+3. Copies backend code to each backend VM and restarts the FastAPI service
+4. Applies the Nginx upstream config (generated from `nginx.conf.tpl` with backend IPs)
+
+### 4. Verify
+```bash
+curl http://$LB_IP/health    # should return node_id; re-run to see it rotate
+curl http://$LB_IP/metrics   # Prometheus output
+```
+
+### Teardown
+```bash
+terraform -chdir=infrastructure destroy -var="project_id=YOUR_GCP_PROJECT_ID"
+```
 
 ---
 
@@ -294,152 +329,64 @@ Nginx config is generated from `nginx.conf.tpl` with backend VM IPs injected by 
 
 `scripts/load_test.js` runs two scenarios:
 
-1. **Read-heavy**: ramp 10 → 100 → 500 VUs hitting `GET /api/events?city=Berlin&sport=Football&day=<today>`
-2. **Mixed**: 50% reads (`GET /api/events`), 50% joins (`POST /api/events/{id}/join`)
+1. **Read-heavy:** ramp 10 → 100 → 500 VUs hitting `GET /api/events?city=Berlin&sport=Football&day=<today>`
+2. **Mixed:** 50% reads (`GET /api/events`), 50% joins (`POST /api/events/{id}/join`)
 
-Run against each configuration (1, 3, 5 backend nodes) and record:
+Run against each configuration:
+```bash
+# Set target to the LB public IP
+k6 run -e BASE_URL=http://$LB_IP scripts/load_test.js
+```
+
+Record for each of 1 / 3 / 5 nodes:
 - Requests/second (throughput)
 - p95 response latency
 - Error rate (429s, 5xx)
 
-Results go on one slide for the presentation.
+### Bonus — Vertical Scaling
+Re-run the same tests with `machine_type=e2-standard-2` instead of `e2-medium` and compare results across all six configurations (2 machine types × 3 node counts).
+
+```bash
+terraform apply -var="project_id=..." -var="backend_node_count=1" -var="machine_type=e2-standard-2"
+```
 
 ---
 
-## Known Limitations to Document
+## Infrastructure Variables
 
-1. **Rate limiter is per-process**: each backend node has its own in-memory bucket per IP. A client could make 60 req/s × N nodes before hitting a limit. A production system would use a shared Redis counter.
-2. **Redis is a single point of failure**: no replication. If the Redis VM goes down, all cache misses hit PostgreSQL directly.
-3. **Cache invalidation is key-level**: deleting `events:{city}:{sport}:{day}` only clears that exact combination. A new event in Berlin for Sunday football won't invalidate a cached query for "all sports in Berlin on Sunday".
-4. **No token expiry**: JWTs do not expire. A production system would add short-lived access tokens and refresh tokens.
-5. **Passwords in DB**: plain bcrypt, no salting beyond what bcrypt provides internally, no pepper. Sufficient for a prototype.
+| Variable | Default | Description |
+|---|---|---|
+| `project_id` | _(required)_ | GCP project ID |
+| `backend_node_count` | `1` | Number of backend VMs (1, 3, or 5) |
+| `machine_type` | `e2-medium` | GCP machine type for all VMs |
+| `region` | `europe-west3` | GCP region (Frankfurt) |
+| `ssh_public_key_path` | `~/.ssh/id_rsa.pub` | SSH key for VM access |
 
 ---
 
-## Dev Prerequisites (Fresh Machine)
+## Environment Variables
 
-Complete these steps in order before starting development.
-
-### 1. Homebrew (macOS package manager)
-
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+### Backend (`.env`)
+```
+DATABASE_URL=postgresql://gamba:gamba@<POSTGRES_IP>:5432/gamba
+REDIS_URL=redis://<REDIS_IP>:6379
+JWT_SECRET_KEY=change-me-in-production
+ALLOWED_ORIGINS=http://<LB_IP>
 ```
 
-### 2. Git
-
-```bash
-brew install git
-git config --global user.name "Your Name"
-git config --global user.email "you@example.com"
+### Frontend (`.env`)
+```
+VITE_API_URL=http://<LB_IP>
 ```
 
-### 3. Node.js (via nvm)
+For local dev, both default to `localhost` if the env file is absent.
 
-```bash
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-source ~/.zshrc
-nvm install 20
-nvm use 20
-node --version   # should print v20.x.x
-```
+---
 
-### 4. Python 3.11+
+## Known Limitations
 
-```bash
-brew install python@3.11
-python3 --version   # should print 3.11.x or higher
-```
-
-### 5. Docker Desktop
-
-Download and install from: https://www.docker.com/products/docker-desktop/
-
-After installation:
-
-```bash
-docker --version        # verify install
-docker compose version  # verify compose plugin
-```
-
-Docker is used to run PostgreSQL and Redis locally during development without installing them natively.
-
-### 6. Terraform
-
-```bash
-brew tap hashicorp/tap
-brew install hashicorp/tap/terraform
-terraform --version   # should print 1.x.x
-```
-
-### 7. Google Cloud SDK
-
-```bash
-brew install --cask google-cloud-sdk
-gcloud init                   # follow prompts: log in, pick project
-gcloud auth application-default login
-gcloud --version
-```
-
-### 8. K6 (load testing)
-
-```bash
-brew install k6
-k6 version
-```
-
-### 9. Local dev environment (Docker Compose)
-
-Create a `docker-compose.dev.yml` at the project root to spin up PostgreSQL and Redis locally:
-
-```yaml
-services:
-  postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: gamba
-      POSTGRES_PASSWORD: gamba
-      POSTGRES_DB: gamba
-    ports:
-      - "5432:5432"
-
-  redis:
-    image: redis:7
-    ports:
-      - "6379:6379"
-```
-
-Start with:
-
-```bash
-docker compose -f docker-compose.dev.yml up -d
-```
-
-### 10. Backend dev setup
-
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload   # starts on http://localhost:8000
-```
-
-### 11. Frontend dev setup
-
-```bash
-cd frontend
-npm install
-npm run dev   # starts on http://localhost:5173
-```
-
-### Quick verification checklist
-
-```bash
-node --version       # v20+
-python3 --version    # 3.11+
-docker --version     # any recent
-terraform --version  # 1.x
-gcloud --version     # any recent
-k6 version           # any recent
-```
+1. **Rate limiter is per-process:** each backend node has its own in-memory bucket per IP. With N nodes a client gets 60 × N requests/second before hitting any limit. A production system would use a shared Redis counter.
+2. **Redis is a single point of failure:** no replication. If the Redis VM goes down, all reads fall through to PostgreSQL.
+3. **Cache invalidation is exact-key only:** deleting `events:Berlin:Football:2026-07-10` does not invalidate `events:Berlin:all:2026-07-10`. Stale data possible for catch-all queries.
+4. **JWTs do not expire:** tokens are valid indefinitely. A production system would use short-lived tokens with refresh.
+5. **PostgreSQL is not scaled:** it is the bottleneck at very high write load. Outside the scope of this assignment.
