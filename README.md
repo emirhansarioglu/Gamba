@@ -130,13 +130,6 @@ created_at   TIMESTAMP DEFAULT NOW()
 4. The frontend stores the JWT in `localStorage` and injects it as `Authorization: Bearer <token>` on every subsequent request via an Axios interceptor.
 5. Protected endpoints decode the JWT, verify the signature, and check the role. No session state is held on the server.
 
-### New Endpoints
-
-```
-POST /api/auth/register   body: {username, password, role}   → 201 {username, role}
-POST /api/auth/login      body: {username, password}         → 200 {access_token, role}
-```
-
 ### Authorization Rules
 
 | Endpoint | Allowed roles |
@@ -144,19 +137,6 @@ POST /api/auth/login      body: {username, password}         → 200 {access_tok
 | `GET /api/events` | player, organizer |
 | `POST /api/events` | organizer only (403 otherwise) |
 | `POST /api/events/{id}/join` | player only (403 otherwise) |
-
-### New Backend Files
-
-- `routers/auth.py` — register and login route handlers
-- `auth_utils.py` — `hash_password()`, `verify_password()`, `create_token()`, `decode_token()`
-
-### New Dependencies
-
-```
-passlib[bcrypt]
-python-jose[cryptography]
-python-multipart
-```
 
 ---
 
@@ -192,6 +172,10 @@ POST /api/events/{id}/join
      → 200 {joined_count, capacity}
      → 409 if event is full
      → invalidates Redis key for that event's city/sport/day
+
+POST /api/auth/register   body: {username, password, role}   → 201 {username, role}
+
+POST /api/auth/login      body: {username, password}         → 200 {access_token, role}
 ```
 
 ---
