@@ -243,7 +243,7 @@ docker compose -f docker-compose.dev.yml up -d
 ```bash
 cd backend
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate     # .\.venv\Scripts\Activate.ps1 for Windows
 pip install -r requirements.txt
 cp .env.example .env          # edit if needed
 uvicorn main:app --reload     # http://localhost:8000
