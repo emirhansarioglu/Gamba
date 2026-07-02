@@ -1,6 +1,7 @@
 variable "project_id" {
   description = "GCP project ID"
   type        = string
+  # default     = "project-9a0a6f54-8a89-47b8-a40"
 }
 
 variable "region" {
@@ -18,7 +19,7 @@ variable "zone" {
 variable "machine_type" {
   description = "GCP machine type for all VMs"
   type        = string
-  default     = "e2-medium"
+  default     = "e2-micro"
 }
 
 variable "backend_node_count" {
