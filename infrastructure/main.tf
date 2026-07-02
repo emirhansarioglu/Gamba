@@ -17,11 +17,28 @@ provider "google" {
   zone    = var.zone
 }
 
+# ── APIs ───────────────────────────────────────────────────────────────────
+
+resource "google_project_service" "required_apis" {
+  for_each = toset([
+    "compute.googleapis.com",
+  ])
+
+  project = var.project_id
+  service = each.value
+
+  disable_on_destroy = false
+}
+
 # ── Network ───────────────────────────────────────────────────────────────────
 
 resource "google_compute_network" "gamba" {
   name                    = "gamba-network"
   auto_create_subnetworks = false
+
+  depends_on = [
+    google_project_service.required_apis
+  ]
 }
 
 resource "google_compute_subnetwork" "gamba" {
