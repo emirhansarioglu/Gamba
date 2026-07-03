@@ -88,8 +88,9 @@ gamba/
 │   ├── nginx.conf.tpl                # Nginx upstream template (IPs injected by Terraform)
 │   └── outputs.tf                    # LB public IP, backend IPs
 ├── scripts/
-│   ├── bootstrap.sh                  # Install deps on a fresh GCP VM
-│   ├── deploy.sh                     # Build frontend, push code, restart services
+│   ├── build_images.sh               # Build and push Docker images to Artifact Registry
+│   ├── deploy.sh                     # Provision registry, build images, deploy the GCP cluster
+│   ├── bootstrap.sh                  # Legacy VM bootstrap script from the pre-container flow
 │   └── load_test.js                  # K6 load test script
 ├── docker-compose.dev.yml            # Local PostgreSQL + Redis for development
 └── README.md
@@ -268,52 +269,50 @@ npm run dev                   # http://localhost:5173
   gcloud init
   gcloud auth application-default login
   ```
-- A GCP project with Compute Engine API enabled
+- Docker installed and running locally
+- A GCP project where your account can enable APIs, create Compute Engine VMs, manage IAM bindings, and push to Artifact Registry
 - An SSH key pair (default: `~/.ssh/id_rsa` / `~/.ssh/id_rsa.pub`)
 
-### 1. Provision infrastructure
+### One-command deployment
 ```bash
-cd infrastructure
+# 1 backend node
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 1 e2-micro dev
 
-# Single node (default)
-terraform init
-terraform apply -var="project_id=YOUR_GCP_PROJECT_ID"
+# 3 backend nodes
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-micro dev
 
-# 3-node cluster
-terraform apply -var="project_id=YOUR_GCP_PROJECT_ID" -var="backend_node_count=3"
-
-# 5-node cluster
-terraform apply -var="project_id=YOUR_GCP_PROJECT_ID" -var="backend_node_count=5"
+# 5 backend nodes
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 5 e2-micro dev
 ```
 
+Debugged Eddy's Version:
+```bash
+& "C:\Program Files\Git\bin\bash.exe" scripts/deploy.sh project-9a0a6f54-8a89-47b8-a40 1 e2-micro dev
+```
+
+The script does:
+1. Runs `terraform init`.
+2. Enables required GCP APIs and creates the Artifact Registry repository.
+3. Builds `gamba-backend` and `gamba-frontend` locally with Docker and pushes them to Artifact Registry.
+4. Applies Terraform for the cluster.
+5. Restarts the VMs so startup scripts pull the current images and Nginx gets the current backend list.
+6. Prints the public load-balancer URL.
+
 Terraform creates:
-- 1 `infra` VM (public IP) — runs Nginx, PostgreSQL, and Redis
+- 1 `infra` VM (public IP) — runs Nginx, PostgreSQL, Redis, and the frontend container
 - N `backend-*` VMs (internal only, port 8000)
 - Firewall rules: port 80 public → infra; port 8000/5432/6379 internal only
 
-### 2. Bootstrap VMs
+### Build images only
 ```bash
-# Run once per VM type after provisioning
-bash scripts/bootstrap.sh infra infra
-bash scripts/bootstrap.sh backend-1 backend
-# repeat for backend-2, backend-3, etc.
+bash scripts/build_images.sh YOUR_GCP_PROJECT_ID europe-west3 gamba dev
 ```
 
-### 3. Deploy application
+Use this after the Artifact Registry repository exists if you only changed application code and want to push a new image tag.
+
+### Verify
 ```bash
-# Pass the LB public IP so the frontend build bakes in the correct API URL
 LB_IP=$(terraform -chdir=infrastructure output -raw lb_ip)
-bash scripts/deploy.sh $LB_IP
-```
-
-`deploy.sh` does:
-1. Builds frontend with `VITE_API_URL=http://$LB_IP`
-2. Copies static files to Nginx on the LB VM
-3. Copies backend code to each backend VM and restarts the FastAPI service
-4. Applies the Nginx upstream config (generated from `nginx.conf.tpl` with backend IPs)
-
-### 4. Verify
-```bash
 curl http://$LB_IP/health    # should return node_id; re-run to see it rotate
 curl http://$LB_IP/metrics   # Prometheus output
 ```

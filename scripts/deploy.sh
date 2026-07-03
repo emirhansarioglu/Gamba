@@ -1,100 +1,91 @@
 #!/usr/bin/env bash
-# Deploy Gamba to GCP.
-# Run from the project root after `terraform apply` and bootstrap.sh.
-# Usage: bash scripts/deploy.sh [zone]
 set -euo pipefail
 
-ZONE=${1:-europe-west3-a}
+usage() {
+  cat <<'USAGE'
+Usage: scripts/deploy.sh <project_id> [backend_node_count] [machine_type] [image_tag]
+
+Examples:
+  scripts/deploy.sh my-gcp-project 1 e2-micro dev
+  scripts/deploy.sh my-gcp-project 3 e2-micro dev
+  scripts/deploy.sh my-gcp-project 5 e2-standard-2 perf
+
+This script:
+  1. Creates/enables the GCP APIs and Artifact Registry repository.
+  2. Builds backend/frontend images locally with Docker and pushes them to Artifact Registry.
+  3. Applies the Compute Engine cluster that pulls nginx, postgres, redis, backend, and frontend images.
+USAGE
+}
+
+PROJECT_ID="${1:-}"
+BACKEND_NODE_COUNT="${2:-1}"
+MACHINE_TYPE="${3:-e2-micro}"
+IMAGE_TAG="${4:-dev}"
+REGION="${REGION:-europe-west3}"
+ZONE="${ZONE:-europe-west3-a}"
+ARTIFACT_REPO_ID="${ARTIFACT_REPO_ID:-gamba}"
+
+if [[ -z "$PROJECT_ID" ]]; then
+  usage
+  exit 1
+fi
+
+case "$BACKEND_NODE_COUNT" in
+  1|3|5) ;;
+  *)
+    echo "backend_node_count must be 1, 3, or 5" >&2
+    exit 1
+    ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT_DIR="${SCRIPT_DIR}/.."
-INFRA_DIR="${ROOT_DIR}/infrastructure"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+TF_DIR="${ROOT_DIR}/infrastructure"
 
-# ── Read Terraform outputs ────────────────────────────────────────────────────
-echo "==> Reading Terraform outputs"
-cd "${INFRA_DIR}"
-LB_IP=$(terraform output -raw lb_ip)
-INFRA_IP=$(terraform output -raw infra_ip)
-mapfile -t BACKEND_IPS < <(terraform output -json backend_ips | python3 -c "import json,sys; [print(ip) for ip in json.load(sys.stdin)]")
-cd "${ROOT_DIR}"
+TF_VARS=(
+  -var="project_id=${PROJECT_ID}"
+  -var="region=${REGION}"
+  -var="zone=${ZONE}"
+  -var="artifact_repo_id=${ARTIFACT_REPO_ID}"
+  -var="backend_node_count=${BACKEND_NODE_COUNT}"
+  -var="machine_type=${MACHINE_TYPE}"
+  -var="image_tag=${IMAGE_TAG}"
+)
 
-echo "    Infra VM: ${LB_IP} (public) / ${INFRA_IP} (internal)"
-echo "    Backends: ${#BACKEND_IPS[@]} node(s)"
+echo "==> Initializing Terraform"
+terraform -chdir="${TF_DIR}" init
 
-# ── Build frontend ────────────────────────────────────────────────────────────
-echo "==> Building frontend (API → http://${LB_IP})"
-cd "${ROOT_DIR}/frontend"
-VITE_API_URL="http://${LB_IP}" npm run build
-cd "${ROOT_DIR}"
+echo ""
+echo "==> Creating Artifact Registry foundation"
+terraform -chdir="${TF_DIR}" apply \
+  -target=google_project_service.required_apis \
+  -target=google_artifact_registry_repository.gamba \
+  "${TF_VARS[@]}"
 
-# ── Deploy frontend static files to infra VM ─────────────────────────────────
-echo "==> Copying frontend to infra VM"
-gcloud compute ssh "gamba@infra" --zone="${ZONE}" \
-  --command="sudo mkdir -p /var/www/gamba && sudo chown gamba /var/www/gamba"
-gcloud compute scp --recurse "${ROOT_DIR}/frontend/dist/." \
-  "gamba@infra:/var/www/gamba/" --zone="${ZONE}"
+echo ""
+echo "==> Building and pushing application images"
+"${SCRIPT_DIR}/build_images.sh" "${PROJECT_ID}" "${REGION}" "${ARTIFACT_REPO_ID}" "${IMAGE_TAG}"
 
-# ── Push Nginx config and reload ──────────────────────────────────────────────
-echo "==> Configuring Nginx"
-gcloud compute scp "${INFRA_DIR}/nginx.conf" \
-  "gamba@infra:/tmp/gamba_nginx.conf" --zone="${ZONE}"
-gcloud compute ssh "gamba@infra" --zone="${ZONE}" --command="
-  sudo cp /tmp/gamba_nginx.conf /etc/nginx/sites-available/gamba
-  sudo ln -sf /etc/nginx/sites-available/gamba /etc/nginx/sites-enabled/gamba
-  sudo rm -f /etc/nginx/sites-enabled/default
-  sudo nginx -t && sudo systemctl reload nginx
-"
+echo ""
+echo "==> Applying ${BACKEND_NODE_COUNT}-backend-node cluster"
+terraform -chdir="${TF_DIR}" apply "${TF_VARS[@]}"
 
-# ── Deploy backend to each node ───────────────────────────────────────────────
-for i in "${!BACKEND_IPS[@]}"; do
-  INSTANCE="backend-$((i + 1))"
-  echo "==> Deploying to ${INSTANCE}"
-
-  gcloud compute ssh "gamba@${INSTANCE}" --zone="${ZONE}" \
-    --command="mkdir -p /home/gamba/gamba"
-
-  gcloud compute scp --recurse "${ROOT_DIR}/backend/." \
-    "gamba@${INSTANCE}:/home/gamba/gamba/" --zone="${ZONE}"
-
-  # Write .env — both DATABASE_URL and REDIS_URL point to the infra VM's internal IP
-  gcloud compute ssh "gamba@${INSTANCE}" --zone="${ZONE}" --command="
-    cat > /home/gamba/gamba/.env << 'ENVEOF'
-DATABASE_URL=postgresql://gamba:gamba@${INFRA_IP}:5432/gamba
-REDIS_URL=redis://${INFRA_IP}:6379
-JWT_SECRET_KEY=gamba-production-secret
-ALLOWED_ORIGINS=http://${LB_IP}
-ENVEOF
-
-    cd /home/gamba/gamba
-    python3 -m venv .venv
-    .venv/bin/pip install -q -r requirements.txt
-
-    if ! sudo systemctl list-units --full -all | grep -q 'gamba.service'; then
-      sudo bash -c 'cat > /etc/systemd/system/gamba.service << EOF
-[Unit]
-Description=Gamba FastAPI
-After=network.target
-
-[Service]
-User=gamba
-WorkingDirectory=/home/gamba/gamba
-EnvironmentFile=/home/gamba/gamba/.env
-ExecStart=/home/gamba/gamba/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF'
-      sudo systemctl daemon-reload
-      sudo systemctl enable gamba
-    fi
-    sudo systemctl restart gamba
-  "
+INSTANCES=(infra)
+for ((i = 1; i <= BACKEND_NODE_COUNT; i++)); do
+  INSTANCES+=("backend-${i}")
 done
 
-# ── Verify ────────────────────────────────────────────────────────────────────
 echo ""
-echo "==> Deployment complete!"
-echo "    App:     http://${LB_IP}"
-echo "    Health:  curl http://${LB_IP}/health"
-echo "    Metrics: curl http://${LB_IP}/metrics"
+echo "==> Restarting VMs so startup scripts pull current images and Nginx sees current backends"
+gcloud compute instances reset "${INSTANCES[@]}" \
+  --project="${PROJECT_ID}" \
+  --zone="${ZONE}" \
+  --quiet
+
+LB_IP="$(terraform -chdir="${TF_DIR}" output -raw lb_ip)"
+
+echo ""
+echo "==> Deployment complete"
+echo "App:     http://${LB_IP}"
+echo "Health:  curl http://${LB_IP}/health"
+echo "Metrics: curl http://${LB_IP}/metrics"
