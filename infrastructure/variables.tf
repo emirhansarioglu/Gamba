@@ -70,6 +70,30 @@ variable "redis_image" {
   default     = "redis:7"
 }
 
+variable "enable_observability" {
+  description = "Whether the infra VM should run Prometheus and Grafana containers."
+  type        = bool
+  default     = true
+}
+
+variable "prometheus_image" {
+  description = "Prometheus image pulled by the infra VM."
+  type        = string
+  default     = "prom/prometheus:v2.55.1"
+}
+
+variable "grafana_image" {
+  description = "Grafana image pulled by the infra VM."
+  type        = string
+  default     = "grafana/grafana:11.3.0"
+}
+
+variable "observability_source_ranges" {
+  description = "CIDR ranges allowed to access Grafana and Prometheus. Restrict this for non-demo deployments."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
 variable "jwt_secret_key" {
   type      = string
   default   = "gamba-production-secret"

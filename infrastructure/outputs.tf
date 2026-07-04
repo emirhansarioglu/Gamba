@@ -34,6 +34,16 @@ output "redis_image" {
   value = local.redis_image
 }
 
+output "prometheus_url" {
+  description = "Prometheus URL when observability is enabled"
+  value       = var.enable_observability ? "http://${google_compute_address.infra_public.address}:9090" : null
+}
+
+output "grafana_url" {
+  description = "Grafana URL when observability is enabled"
+  value       = var.enable_observability ? "http://${google_compute_address.infra_public.address}:3000" : null
+}
+
 output "artifact_registry_host" {
   value = local.artifact_registry_host
 }

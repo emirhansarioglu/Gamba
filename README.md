@@ -92,7 +92,8 @@ gamba/
 │   ├── deploy.sh                     # Provision registry, build images, deploy the GCP cluster
 │   ├── bootstrap.sh                  # Legacy VM bootstrap script from the pre-container flow
 │   └── load_test.js                  # K6 load test script
-├── docker-compose.dev.yml            # Local PostgreSQL + Redis for development
+├── observability/                    # Prometheus scrape config and Grafana dashboard provisioning
+├── docker-compose.dev.yml            # Local app, database, cache, Prometheus, and Grafana
 └── README.md
 ```
 
@@ -206,6 +207,64 @@ Exposed at `GET /metrics` in Prometheus text format. No auth required (internal 
 
 ---
 
+## Observability
+
+The backend exposes Prometheus metrics at:
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+For local load testing, `docker-compose.dev.yml` starts Prometheus and Grafana in addition to the application stack:
+
+| Service | Local URL | Purpose |
+|---|---|---|
+| Backend metrics | `http://localhost:8000/metrics` | Raw Prometheus text output from FastAPI |
+| Prometheus | `http://localhost:9090` | Scrapes and stores backend metrics |
+| Grafana | `http://localhost:3000` | Graphs the load testing dashboard |
+
+Start the full local stack:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+Grafana credentials:
+
+```text
+admin / admin
+```
+
+The dashboard is provisioned automatically from `observability/grafana/dashboards/gamba-load-testing.json` and appears under:
+
+```text
+Dashboards -> Gamba -> Gamba Load Testing
+```
+
+Prometheus scrapes the backend every 5 seconds using `observability/prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: gamba-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - backend:8000
+```
+
+The Grafana dashboard contains four panels:
+
+| Panel | Query | What it shows |
+|---|---|---|
+| Backend Requests Per Second By Status | `sum by (status) (rate(gamba_requests_total[1m]))` | Throughput split by HTTP status, such as `200`, `429`, or `500` |
+| Backend p95 Latency | `histogram_quantile(0.95, sum by (le, endpoint) (rate(gamba_request_duration_seconds_bucket[1m])))` | 95th percentile backend response time per endpoint |
+| Redis Cache Hit And Miss Rate | `rate(gamba_cache_hits_total[1m])`, `rate(gamba_cache_misses_total[1m])` | Whether reads are served from Redis or PostgreSQL |
+| Rate Limited Requests | `rate(gamba_rate_limited_total[1m])` | Requests rejected by the token bucket middleware |
+
+For scalability benchmarking, use the requests-per-second and p95 latency panels as the main evidence. For overload mitigation, use the rate-limited requests panel to show that excess traffic is rejected with `429 Too Many Requests`.
+
+---
+
 ## Authentication
 
 1. Register: `POST /api/auth/register` → bcrypt hash stored, JWT returned on login
@@ -238,6 +297,15 @@ The frontend is intentionally minimal — the focus of this project is backend s
 ### Start local services
 ```bash
 docker compose -f docker-compose.dev.yml up -d
+```
+
+This starts PostgreSQL, Redis, the backend, the frontend, Prometheus, and Grafana. After startup:
+
+```text
+Frontend:   http://localhost:5173
+Backend:    http://localhost:8000
+Prometheus: http://localhost:9090
+Grafana:    http://localhost:3000
 ```
 
 ### Backend
@@ -317,6 +385,15 @@ curl http://$LB_IP/health    # should return node_id; re-run to see it rotate
 curl http://$LB_IP/metrics   # Prometheus output
 ```
 
+When `enable_observability=true` (the default), Terraform also runs Prometheus and Grafana on the infra VM:
+
+```bash
+terraform -chdir=infrastructure output -raw prometheus_url
+terraform -chdir=infrastructure output -raw grafana_url
+```
+
+Grafana is available with `admin / admin` credentials and contains the same `Gamba Load Testing` dashboard used locally. Prometheus scrapes each backend node directly by internal IP, so 1 / 3 / 5 node test runs can be compared from the dashboard.
+
 ### Teardown
 ```bash
 terraform -chdir=infrastructure destroy -var="project_id=YOUR_GCP_PROJECT_ID"
@@ -335,6 +412,19 @@ Run against each configuration:
 ```bash
 # Set target to the LB public IP
 k6 run -e BASE_URL=http://$LB_IP scripts/load_test.js
+```
+
+For local testing with the observability dashboard open:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d --build
+k6 run -e BASE_URL=http://localhost:8000 scripts/load_test.js
+```
+
+Then watch:
+
+```text
+http://localhost:3000/d/gamba-load-testing/gamba-load-testing
 ```
 
 Record for each of 1 / 3 / 5 nodes:
@@ -360,6 +450,8 @@ terraform apply -var="project_id=..." -var="backend_node_count=1" -var="machine_
 | `machine_type` | `e2-medium` | GCP machine type for all VMs |
 | `region` | `europe-west3` | GCP region (Frankfurt) |
 | `ssh_public_key_path` | `~/.ssh/id_rsa.pub` | SSH key for VM access |
+| `enable_observability` | `true` | Run Prometheus and Grafana on the infra VM |
+| `observability_source_ranges` | `["0.0.0.0/0"]` | CIDR ranges allowed to access Prometheus `:9090` and Grafana `:3000` |
 
 ---
 

@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: Gamba
+    orgId: 1
+    folder: Gamba
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

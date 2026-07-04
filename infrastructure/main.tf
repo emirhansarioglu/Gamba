@@ -89,6 +89,20 @@ resource "google_compute_firewall" "allow_http" {
   target_tags   = ["nginx-lb"]
 }
 
+resource "google_compute_firewall" "allow_observability" {
+  count   = var.enable_observability ? 1 : 0
+  name    = "gamba-allow-observability"
+  network = google_compute_network.gamba.name
+
+  allow {
+    protocol = "tcp"
+    ports    = ["3000", "9090"]
+  }
+
+  source_ranges = var.observability_source_ranges
+  target_tags   = ["observability"]
+}
+
 resource "google_compute_firewall" "allow_ssh" {
   name    = "gamba-allow-ssh"
   network = google_compute_network.gamba.name
@@ -161,7 +175,7 @@ resource "google_compute_instance" "backend" {
 resource "google_compute_instance" "infra" {
   name         = "infra"
   machine_type = var.machine_type
-  tags         = ["nginx-lb", "gamba-vm"]
+  tags         = var.enable_observability ? ["nginx-lb", "gamba-vm", "observability"] : ["nginx-lb", "gamba-vm"]
 
   boot_disk {
     initialize_params {
@@ -194,6 +208,10 @@ resource "google_compute_instance" "infra" {
     nginx_image            = local.nginx_image
     postgres_image         = local.postgres_image
     redis_image            = local.redis_image
+    enable_observability   = var.enable_observability
+    prometheus_image       = local.prometheus_image
+    grafana_image          = local.grafana_image
+    grafana_dashboard_json = file("${path.module}/../observability/grafana/dashboards/gamba-load-testing.json")
     backend_ips            = [for b in google_compute_instance.backend : b.network_interface[0].network_ip]
   }), "\r\n", "\n")
 

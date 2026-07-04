@@ -13,7 +13,7 @@ Examples:
 This script:
   1. Creates/enables the GCP APIs and Artifact Registry repository.
   2. Builds backend/frontend images locally with Docker and pushes them to Artifact Registry.
-  3. Applies the Compute Engine cluster that pulls nginx, postgres, redis, backend, and frontend images.
+  3. Applies the Compute Engine cluster that pulls nginx, postgres, redis, backend, frontend, Prometheus, and Grafana images.
 USAGE
 }
 
@@ -83,9 +83,18 @@ gcloud compute instances reset "${INSTANCES[@]}" \
   --quiet
 
 LB_IP="$(terraform -chdir="${TF_DIR}" output -raw lb_ip)"
+PROMETHEUS_URL="$(terraform -chdir="${TF_DIR}" output -raw prometheus_url 2>/dev/null || true)"
+GRAFANA_URL="$(terraform -chdir="${TF_DIR}" output -raw grafana_url 2>/dev/null || true)"
 
 echo ""
 echo "==> Deployment complete"
-echo "App:     http://${LB_IP}"
-echo "Health:  curl http://${LB_IP}/health"
-echo "Metrics: curl http://${LB_IP}/metrics"
+echo "App:        http://${LB_IP}"
+echo "Health:     curl http://${LB_IP}/health"
+echo "Metrics:    curl http://${LB_IP}/metrics"
+if [[ -n "$PROMETHEUS_URL" && "$PROMETHEUS_URL" != "null" ]]; then
+  echo "Prometheus: ${PROMETHEUS_URL}"
+fi
+if [[ -n "$GRAFANA_URL" && "$GRAFANA_URL" != "null" ]]; then
+  echo "Grafana:    ${GRAFANA_URL}"
+  echo "Grafana login: admin / admin"
+fi
