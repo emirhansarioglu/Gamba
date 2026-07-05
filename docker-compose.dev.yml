@@ -24,6 +24,7 @@ services:
     environment:
       DATABASE_URL: postgresql://gamba:gamba@postgres:5432/gamba
       REDIS_URL: redis://redis:6379/0
+      TRUST_FORWARDED_IPS: "true"
     ports:
       - "8000:8000"
     volumes:

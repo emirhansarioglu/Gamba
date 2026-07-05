@@ -403,10 +403,18 @@ terraform -chdir=infrastructure destroy -var="project_id=YOUR_GCP_PROJECT_ID"
 
 ## Load Testing (K6)
 
-`scripts/load_test.js` runs two scenarios:
+`scripts/load_test.js` runs a read-heavy scenario that ramps 10 → 100 → 500 VUs hitting `GET /api/events?city=Berlin&sport=Football&day=<today>`.
 
-1. **Read-heavy:** ramp 10 → 100 → 500 VUs hitting `GET /api/events?city=Berlin&sport=Football&day=<today>`
-2. **Mixed:** 50% reads (`GET /api/events`), 50% joins (`POST /api/events/{id}/join`)
+The script sends one synthetic `X-Forwarded-For` IP per K6 virtual user. For local Docker Compose load tests, `docker-compose.dev.yml` enables `TRUST_FORWARDED_IPS=true` so the backend rate limiter uses those synthetic IPs instead of treating all requests as coming from `localhost`.
+
+The script also emits custom failure counters:
+
+| Counter | Meaning |
+|---|---|
+| `read_rate_limited` | `GET /api/events` returned `429 Too Many Requests` |
+| `read_client_errors` | `GET /api/events` returned another `4xx` status |
+| `read_server_errors` | `GET /api/events` returned a `5xx` status |
+| `read_unexpected_status` | `GET /api/events` returned a non-200 status outside those groups |
 
 Run against each configuration:
 ```bash
@@ -419,6 +427,24 @@ For local testing with the observability dashboard open:
 ```bash
 docker compose -f docker-compose.dev.yml up -d --build
 k6 run -e BASE_URL=http://localhost:8000 scripts/load_test.js
+```
+
+To print a small sample of failed responses during the run, enable debug output:
+
+```bash
+k6 run -e BASE_URL=http://localhost:8000 -e DEBUG_FAILURES=true scripts/load_test.js
+```
+
+To disable synthetic forwarded IPs and test all traffic as coming from one client IP:
+
+```bash
+k6 run -e BASE_URL=http://localhost:8000 -e SPOOF_IPS=false scripts/load_test.js
+```
+
+Use `scripts/load_test_more_workers_less_requests.js` when you want more concurrent virtual users but fewer requests per user. It sleeps longer between requests, which keeps each synthetic user closer to the token bucket refill rate and makes the test less dominated by intentional `429` rate limiting:
+
+```bash
+k6 run -e BASE_URL=http://localhost:8000 scripts/load_test_more_workers_less_requests.js
 ```
 
 Then watch:
