@@ -182,6 +182,16 @@ POST /api/events/{id}/join
 - **On empty bucket:** return `429 Too Many Requests`
 - Increments `gamba_rate_limited_total` Prometheus counter on each 429
 
+### Load Shedding
+
+`middleware/load_shedder.py` rejects requests with `503 Service Unavailable` when the backend is overloaded:
+- **In-flight limit:** rejects when active requests are at or above `MAX_IN_FLIGHT_REQUESTS`
+- **Latency pressure:** tracks an EWMA latency estimate and probabilistically rejects when it is above `MAX_AVG_LATENCY_MS`
+- **Bypass paths:** `/health` and `/metrics` are always allowed
+- **Metrics:** increments `gamba_load_shed_total{reason="in_flight"}` or `gamba_load_shed_total{reason="latency"}`
+
+Rate limiting and load shedding intentionally use different status codes: `429` means one client/IP is sending too much traffic, while `503` means the backend node is protecting itself from global overload.
+
 **Known limitation (documented):** Each backend node maintains its own in-memory bucket. A client can make 60 req/s × N nodes before hitting the limit. A production system would use a shared Redis counter. This is an intentional known trade-off, documented for the presentation.
 
 ### Req 4a — Redis Read-Through Cache
@@ -202,6 +212,9 @@ gamba_request_duration_seconds{endpoint}
 gamba_cache_hits_total
 gamba_cache_misses_total
 gamba_rate_limited_total
+gamba_load_shed_total{reason}
+gamba_in_flight_requests
+gamba_latency_ewma_ms
 ```
 Exposed at `GET /metrics` in Prometheus text format. No auth required (internal network only in production).
 
@@ -252,7 +265,7 @@ scrape_configs:
           - backend:8000
 ```
 
-The Grafana dashboard contains four panels:
+The Grafana dashboard contains five panels:
 
 | Panel | Query | What it shows |
 |---|---|---|
@@ -260,8 +273,9 @@ The Grafana dashboard contains four panels:
 | Backend p95 Latency | `histogram_quantile(0.95, sum by (le, endpoint) (rate(gamba_request_duration_seconds_bucket[1m])))` | 95th percentile backend response time per endpoint |
 | Redis Cache Hit And Miss Rate | `rate(gamba_cache_hits_total[1m])`, `rate(gamba_cache_misses_total[1m])` | Whether reads are served from Redis or PostgreSQL |
 | Rate Limited Requests | `rate(gamba_rate_limited_total[1m])` | Requests rejected by the token bucket middleware |
+| Load Shed Requests | `sum by (reason) (rate(gamba_load_shed_total[1m]))` | Requests rejected by in-flight or latency-based load shedding |
 
-For scalability benchmarking, use the requests-per-second and p95 latency panels as the main evidence. For overload mitigation, use the rate-limited requests panel to show that excess traffic is rejected with `429 Too Many Requests`.
+For scalability benchmarking, use the requests-per-second and p95 latency panels as the main evidence. For overload mitigation, use the rate-limited requests panel to show traffic rejected with `429 Too Many Requests` and the load-shed metric to show traffic rejected with `503 Service Unavailable`.
 
 ---
 
@@ -412,6 +426,9 @@ The script also emits custom failure counters:
 | Counter | Meaning |
 |---|---|
 | `read_rate_limited` | `GET /api/events` returned `429 Too Many Requests` |
+| `read_load_shed_in_flight` | `GET /api/events` returned `503` from the in-flight request limit |
+| `read_load_shed_latency` | `GET /api/events` returned `503` from latency-based shedding |
+| `read_load_shed_unknown` | `GET /api/events` returned `503` without a recognized shedding reason |
 | `read_client_errors` | `GET /api/events` returned another `4xx` status |
 | `read_server_errors` | `GET /api/events` returned a `5xx` status |
 | `read_unexpected_status` | `GET /api/events` returned a non-200 status outside those groups |
@@ -441,11 +458,25 @@ To disable synthetic forwarded IPs and test all traffic as coming from one clien
 k6 run -e BASE_URL=http://localhost:8000 -e SPOOF_IPS=false scripts/load_test.js
 ```
 
-Use `scripts/load_test_more_workers_less_requests.js` when you want more concurrent virtual users but fewer requests per user. It sleeps longer between requests, which keeps each synthetic user closer to the token bucket refill rate and makes the test less dominated by intentional `429` rate limiting:
 
-```bash
-k6 run -e BASE_URL=http://localhost:8000 scripts/load_test_more_workers_less_requests.js
+To isolate in-flight load shedding, set a low concurrency limit and a very high latency threshold:
+
+```yaml
+LOAD_SHEDDING_ENABLED: "true"
+MAX_IN_FLIGHT_REQUESTS: "20"
+MAX_AVG_LATENCY_MS: "999999"
 ```
+
+To isolate latency-based load shedding, set a high concurrency limit and a low latency threshold:
+
+```yaml
+LOAD_SHEDDING_ENABLED: "true"
+MAX_IN_FLIGHT_REQUESTS: "999999"
+MAX_AVG_LATENCY_MS: "500"
+LATENCY_SHED_PROBABILITY: "0.5"
+```
+
+To introduce these changes to online deployment adjust these values in infrastructure/main.tf
 
 Then watch:
 
@@ -489,6 +520,12 @@ DATABASE_URL=postgresql://gamba:gamba@<POSTGRES_IP>:5432/gamba
 REDIS_URL=redis://<REDIS_IP>:6379
 JWT_SECRET_KEY=change-me-in-production
 ALLOWED_ORIGINS=http://<LB_IP>
+TRUST_FORWARDED_IPS=false
+LOAD_SHEDDING_ENABLED=false
+MAX_IN_FLIGHT_REQUESTS=100
+MAX_AVG_LATENCY_MS=1500
+LATENCY_SHED_PROBABILITY=0.5
+LATENCY_EWMA_ALPHA=0.1
 ```
 
 ### Frontend (`.env`)

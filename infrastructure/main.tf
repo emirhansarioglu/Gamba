@@ -158,12 +158,18 @@ resource "google_compute_instance" "backend" {
   }
 
   metadata_startup_script = replace(templatefile("${path.module}/startup-backend.sh.tpl", {
-    artifact_registry_host = local.artifact_registry_host
-    backend_image          = local.backend_image
-    database_url           = "postgresql://gamba:gamba@${google_compute_address.infra_internal.address}:5432/gamba"
-    redis_url              = "redis://${google_compute_address.infra_internal.address}:6379/0"
-    allowed_origins        = "http://${google_compute_address.infra_public.address}"
-    jwt_secret_key         = var.jwt_secret_key
+    artifact_registry_host   = local.artifact_registry_host
+    backend_image            = local.backend_image
+    database_url             = "postgresql://gamba:gamba@${google_compute_address.infra_internal.address}:5432/gamba"
+    redis_url                = "redis://${google_compute_address.infra_internal.address}:6379/0"
+    allowed_origins          = "http://${google_compute_address.infra_public.address}"
+    jwt_secret_key           = var.jwt_secret_key
+    trust_forwarded_ips      = "true"
+    load_shedding_enabled    = "true"
+    max_in_flight_requests   = "100"
+    max_avg_latency_ms       = "1500"
+    latency_shed_probability = "0.7"
+    latency_ewma_alpha       = "0.2"
   }), "\r\n", "\n")
 
   depends_on = [

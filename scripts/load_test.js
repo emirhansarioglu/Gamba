@@ -9,6 +9,9 @@ const PASSWORD = 'testpass123';
 const DEBUG_FAILURES = (__ENV.DEBUG_FAILURES || 'false').toLowerCase() === 'true';
 
 const readRateLimited = new Counter('read_rate_limited');
+const readLoadShedInFlight = new Counter('read_load_shed_in_flight');
+const readLoadShedLatency = new Counter('read_load_shed_latency');
+const readLoadShedUnknown = new Counter('read_load_shed_unknown');
 const readClientErrors = new Counter('read_client_errors');
 const readServerErrors = new Counter('read_server_errors');
 const readUnexpectedStatus = new Counter('read_unexpected_status');
@@ -34,6 +37,14 @@ function headers(extra = {}) {
   }
 
   return result;
+}
+
+function loadShedReason(res) {
+  try {
+    return res.json('reason') || 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 export const options = {
@@ -92,6 +103,16 @@ export default function () {
 
   if (res.status === 429) {
     readRateLimited.add(1);
+  } else if (res.status === 503) {
+    const reason = loadShedReason(res);
+
+    if (reason === 'in_flight') {
+      readLoadShedInFlight.add(1);
+    } else if (reason === 'latency') {
+      readLoadShedLatency.add(1);
+    } else {
+      readLoadShedUnknown.add(1);
+    }
   } else if (res.status >= 400 && res.status < 500) {
     readClientErrors.add(1);
   } else if (res.status >= 500) {
@@ -105,5 +126,5 @@ export default function () {
   }
 
   sleep(0.1);   // the problem is that the refil rate is 1 req/sec -> most of the requests will be limited
-  //therefore load_test_more_workers_less_requests.js exists
+  //therefore it is adjusted to 0.9
 }
