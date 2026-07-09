@@ -47,8 +47,9 @@ async def observe(request: Request, call_next):
     duration = time.monotonic() - start
 
     endpoint = request.url.path
-    metrics.requests_total.labels(request.method, endpoint, str(response.status_code)).inc()
-    metrics.request_duration.labels(endpoint).observe(duration)
+    status = str(response.status_code)
+    metrics.requests_total.labels(request.method, endpoint, status).inc()
+    metrics.request_duration.labels(endpoint, status).observe(duration)
 
     logger.info(json.dumps({
         "node_id": NODE_ID,

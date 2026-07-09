@@ -188,8 +188,8 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(gamba_request_duration_seconds_bucket[1m])))",
-          "legendFormat": "p95 {{endpoint}}",
+          "expr": "histogram_quantile(0.95, sum by (le, endpoint, status) (rate(gamba_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p95 {{endpoint}} {{status}}",
           "range": true,
           "refId": "A"
         }

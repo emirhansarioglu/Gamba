@@ -7,6 +7,7 @@ const SPOOF_IPS = (__ENV.SPOOF_IPS || 'true').toLowerCase() !== 'false';
 const TODAY = new Date().toISOString().slice(0, 10);
 const PASSWORD = 'testpass123';
 const DEBUG_FAILURES = (__ENV.DEBUG_FAILURES || 'false').toLowerCase() === 'true';
+const TARGET_VUS = Number(__ENV.TARGET_VUS || '500');
 
 const readRateLimited = new Counter('read_rate_limited');
 const readLoadShedInFlight = new Counter('read_load_shed_in_flight');
@@ -55,7 +56,7 @@ export const options = {
       stages: [
         { duration: '30s', target: 10 },
         { duration: '60s', target: 100 },
-        { duration: '60s', target: 500 },
+        { duration: '60s', target: TARGET_VUS },
         { duration: '30s', target: 0 },
       ],
     },

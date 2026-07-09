@@ -9,7 +9,7 @@ requests_total = Counter(
 request_duration = Histogram(
     "gamba_request_duration_seconds",
     "HTTP request duration in seconds",
-    ["endpoint"],
+    ["endpoint", "status"],
 )
 
 cache_hits = Counter("gamba_cache_hits_total", "Redis cache hits")
