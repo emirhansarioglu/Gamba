@@ -47,7 +47,7 @@ variable "artifact_repo_id" {
 }
 
 variable "image_tag" {
-  description = "Docker image tag used for backend and frontend images."
+  description = "Docker image tag used for backend and frontend static asset images."
   type        = string
   default     = "dev"
 }

@@ -12,8 +12,8 @@ Examples:
 
 This script:
   1. Creates/enables the GCP APIs and Artifact Registry repository.
-  2. Builds backend/frontend images locally with Docker and pushes them to Artifact Registry.
-  3. Applies the Compute Engine cluster that pulls nginx, postgres, redis, backend, frontend, Prometheus, and Grafana images.
+  2. Builds backend image & frontend asset image locally with Docker and pushes them to Artifact Registry.
+  3. Applies the Compute Engine cluster that pulls nginx, postgres, redis, backend, frontend asset image, Prometheus, and Grafana images.
 USAGE
 }
 

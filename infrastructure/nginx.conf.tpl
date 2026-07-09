@@ -1,6 +1,10 @@
 events {}
 
 http {
+  include       /etc/nginx/mime.types;
+  default_type  application/octet-stream;
+  sendfile      on;
+
   upstream backend_pool {
 %{ for ip in backend_ips ~}
     server ${ip}:8000 max_fails=3 fail_timeout=10s;
@@ -9,6 +13,9 @@ http {
 
   server {
     listen 80;
+    root /usr/share/nginx/html;
+    index index.html;
+
 
     location /health {
       proxy_pass http://backend_pool;
@@ -46,10 +53,7 @@ http {
     }
 
     location / {
-      proxy_pass http://127.0.0.1:5173;
-      proxy_set_header Host $host;
-      proxy_set_header X-Real-IP $remote_addr;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      try_files $uri $uri/ /index.html;
     }
   }
 }

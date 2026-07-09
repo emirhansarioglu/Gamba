@@ -375,13 +375,13 @@ Debugged Eddy's Version:
 The script does:
 1. Runs `terraform init`.
 2. Enables required GCP APIs and creates the Artifact Registry repository.
-3. Builds `gamba-backend` and `gamba-frontend` locally with Docker and pushes them to Artifact Registry.
+3. Builds `gamba-backend` and `gamba-frontend-assets` locally with Docker and pushes them to Artifact Registry.
 4. Applies Terraform for the cluster.
 5. Restarts the VMs so startup scripts pull the current images and Nginx gets the current backend list.
 6. Prints the public load-balancer URL.
 
 Terraform creates:
-- 1 `infra` VM (public IP) — runs Nginx, PostgreSQL, Redis, and the frontend container
+- 1 `infra` VM (public IP) — runs Nginx (also handling frontend assets), PostgreSQL and Redis.
 - N `backend-*` VMs (internal only, port 8000)
 - Firewall rules: port 80 public → infra; port 8000/5432/6379 internal only
 

@@ -13,6 +13,7 @@ GRAFANA_IMAGE="${grafana_image}"
 mkdir -p /mnt/stateful_partition/gamba/postgres
 mkdir -p /mnt/stateful_partition/gamba/redis
 mkdir -p /mnt/stateful_partition/gamba/nginx
+mkdir -p /mnt/stateful_partition/gamba/frontend
 mkdir -p /mnt/stateful_partition/gamba/prometheus
 mkdir -p /mnt/stateful_partition/gamba/grafana/provisioning/datasources
 mkdir -p /mnt/stateful_partition/gamba/grafana/provisioning/dashboards
@@ -142,17 +143,20 @@ else
   docker rm -f gamba-grafana || true
 fi
 
-docker rm -f gamba-frontend || true
-docker run -d \
-  --name gamba-frontend \
-  --restart unless-stopped \
-  -p 127.0.0.1:5173:80 \
-  "$FRONTEND_IMAGE"
+docker rm -f gamba-frontend-assets || true
+rm -rf /mnt/stateful_partition/gamba/frontend/*
+docker create --name gamba-frontend-assets "$FRONTEND_IMAGE"
+docker cp gamba-frontend-assets:/usr/share/nginx/html/. /mnt/stateful_partition/gamba/frontend/
+docker rm -f gamba-frontend-assets
 
 cat > /mnt/stateful_partition/gamba/nginx/nginx.conf <<'EOF'
 events {}
 
 http {
+  include       /etc/nginx/mime.types;
+  default_type  application/octet-stream;
+  sendfile      on;
+
   upstream backend_pool {
 %{ for ip in backend_ips ~}
     server ${ip}:8000 max_fails=3 fail_timeout=10s;
@@ -161,6 +165,9 @@ http {
 
   server {
     listen 80;
+    root /usr/share/nginx/html;
+    index index.html;
+
 
     location /health {
       proxy_pass http://backend_pool;
@@ -198,10 +205,7 @@ http {
     }
 
     location / {
-      proxy_pass http://127.0.0.1:5173;
-      proxy_set_header Host $host;
-      proxy_set_header X-Real-IP $remote_addr;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      try_files $uri $uri/ /index.html;
     }
   }
 }
@@ -213,4 +217,5 @@ docker run -d \
   --restart unless-stopped \
   --network host \
   -v /mnt/stateful_partition/gamba/nginx/nginx.conf:/etc/nginx/nginx.conf:ro \
+  -v /mnt/stateful_partition/gamba/frontend:/usr/share/nginx/html:ro \
   "$NGINX_IMAGE"
