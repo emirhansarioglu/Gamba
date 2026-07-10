@@ -1,0 +1,30 @@
+pg_lock_waiting:
+  query: |
+    SELECT
+      current_database() AS datname,
+      COUNT(*) FILTER (WHERE NOT locks.granted)::float AS waiters,
+      COALESCE(
+        EXTRACT(
+          EPOCH FROM (
+            clock_timestamp() -
+            (MIN(activity.query_start) FILTER (WHERE NOT locks.granted))
+          )
+        ),
+        0
+      )::float AS oldest_wait_seconds
+    FROM pg_locks AS locks
+    LEFT JOIN pg_stat_activity AS activity ON activity.pid = locks.pid
+    WHERE locks.database = (
+      SELECT oid FROM pg_database WHERE datname = current_database()
+    )
+  master: true
+  metrics:
+    - datname:
+        usage: "LABEL"
+        description: "Database name"
+    - waiters:
+        usage: "GAUGE"
+        description: "Lock requests currently waiting to be granted"
+    - oldest_wait_seconds:
+        usage: "GAUGE"
+        description: "Age of the oldest lock request currently waiting"
