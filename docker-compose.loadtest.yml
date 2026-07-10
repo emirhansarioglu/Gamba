@@ -69,7 +69,10 @@ services:
     profiles: ["nodes5"]
 
   nginx:
-    image: nginx:1.27-alpine
+    image: gamba-frontend-assets:loadtest
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
     ports:
       - "8000:80"
     volumes:
