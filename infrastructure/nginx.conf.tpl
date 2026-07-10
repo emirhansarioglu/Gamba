@@ -1,33 +1,59 @@
-upstream gamba_backend {
+events {}
+
+http {
+  include       /etc/nginx/mime.types;
+  default_type  application/octet-stream;
+  sendfile      on;
+
+  upstream backend_pool {
 %{ for ip in backend_ips ~}
-    server ${ip}:8000;
+    server ${ip}:8000 max_fails=3 fail_timeout=10s;
 %{ endfor ~}
-}
+  }
 
-server {
+  server {
     listen 80;
+    root /usr/share/nginx/html;
+    index index.html;
 
-    location /api/ {
-        proxy_pass         http://gamba_backend;
-        proxy_set_header   Host $host;
-        proxy_set_header   X-Real-IP $remote_addr;
-        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
 
     location /health {
-        proxy_pass         http://gamba_backend;
-        proxy_set_header   Host $host;
-        proxy_set_header   X-Real-IP $remote_addr;
+      proxy_pass http://backend_pool;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 
     location /metrics {
-        proxy_pass         http://gamba_backend;
-        proxy_set_header   Host $host;
+      proxy_pass http://backend_pool;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /api/ {
+      proxy_pass http://backend_pool;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /docs {
+      proxy_pass http://backend_pool;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /openapi.json {
+      proxy_pass http://backend_pool;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 
     location / {
-        root       /var/www/gamba;
-        index      index.html;
-        try_files  $uri $uri/ /index.html;
+      try_files $uri $uri/ /index.html;
     }
+  }
 }

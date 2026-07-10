@@ -1,0 +1,104 @@
+x-backend-common: &backend-common
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  env_file:
+    - ./backend/.env
+  environment:
+    DATABASE_URL: postgresql://gamba:gamba@postgres:5432/gamba
+    REDIS_URL: redis://redis:6379/0
+    TRUST_FORWARDED_IPS: "true"
+    LOAD_SHEDDING_ENABLED: "true"
+    MAX_IN_FLIGHT_REQUESTS: "100"
+    MAX_AVG_LATENCY_MS: "1500"
+    LATENCY_SHED_PROBABILITY: "0.7"
+    LATENCY_EWMA_ALPHA: "0.2"
+  volumes:
+    - ./backend:/app
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: gamba
+      POSTGRES_PASSWORD: gamba
+      POSTGRES_DB: gamba
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gamba -d gamba"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend1:
+    <<: *backend-common
+
+  backend2:
+    <<: *backend-common
+    profiles: ["nodes3", "nodes5"]
+
+  backend3:
+    <<: *backend-common
+    profiles: ["nodes3", "nodes5"]
+
+  backend4:
+    <<: *backend-common
+    profiles: ["nodes5"]
+
+  backend5:
+    <<: *backend-common
+    profiles: ["nodes5"]
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8000:80"
+    volumes:
+      - ./observability/${NGINX_CONFIG:-nginx-loadtest-1.conf}:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend1
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/${PROMETHEUS_CONFIG:-prometheus-loadtest-1.yml}:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - backend1
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres_data:

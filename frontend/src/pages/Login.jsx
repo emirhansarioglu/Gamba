@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
+import api from '../api';
 
 export default function Login() {
   const [isRegistering, setIsRegistering] = useState(false);
@@ -21,7 +21,7 @@ export default function Login() {
     try {
       if (isRegistering) {
         // --- REGISTRATION LOGIC ---
-        await axios.post(`${import.meta.env.VITE_API_URL}/api/auth/register`, {
+        await api.post('/api/auth/register', {
           username: username,
           password: password,
           role: role
@@ -33,7 +33,7 @@ export default function Login() {
         
       } else {
         // --- LOGIN LOGIC ---
-        const response = await axios.post(`${import.meta.env.VITE_API_URL}/api/auth/login`, {
+        const response = await api.post('/api/auth/login', {
           username: username,
           password: password
         });

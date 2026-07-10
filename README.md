@@ -88,10 +88,12 @@ gamba/
 │   ├── nginx.conf.tpl                # Nginx upstream template (IPs injected by Terraform)
 │   └── outputs.tf                    # LB public IP, backend IPs
 ├── scripts/
-│   ├── bootstrap.sh                  # Install deps on a fresh GCP VM
-│   ├── deploy.sh                     # Build frontend, push code, restart services
+│   ├── build_images.sh               # Build and push Docker images to Artifact Registry
+│   ├── deploy.sh                     # Provision registry, build images, deploy the GCP cluster
+│   ├── bootstrap.sh                  # Legacy VM bootstrap script from the pre-container flow
 │   └── load_test.js                  # K6 load test script
-├── docker-compose.dev.yml            # Local PostgreSQL + Redis for development
+├── observability/                    # Prometheus scrape config and Grafana dashboard provisioning
+├── docker-compose.dev.yml            # Local app, database, cache, Prometheus, and Grafana
 └── README.md
 ```
 
@@ -180,6 +182,16 @@ POST /api/events/{id}/join
 - **On empty bucket:** return `429 Too Many Requests`
 - Increments `gamba_rate_limited_total` Prometheus counter on each 429
 
+### Load Shedding
+
+`middleware/load_shedder.py` rejects requests with `503 Service Unavailable` when the backend is overloaded:
+- **In-flight limit:** rejects when active requests are at or above `MAX_IN_FLIGHT_REQUESTS`
+- **Latency pressure:** tracks an EWMA latency estimate and probabilistically rejects when it is above `MAX_AVG_LATENCY_MS`
+- **Bypass paths:** `/health` and `/metrics` are always allowed
+- **Metrics:** increments `gamba_load_shed_total{reason="in_flight"}` or `gamba_load_shed_total{reason="latency"}`
+
+Rate limiting and load shedding intentionally use different status codes: `429` means one client/IP is sending too much traffic, while `503` means the backend node is protecting itself from global overload.
+
 **Known limitation (documented):** Each backend node maintains its own in-memory bucket. A client can make 60 req/s × N nodes before hitting the limit. A production system would use a shared Redis counter. This is an intentional known trade-off, documented for the presentation.
 
 ### Req 4a — Redis Read-Through Cache
@@ -200,8 +212,70 @@ gamba_request_duration_seconds{endpoint}
 gamba_cache_hits_total
 gamba_cache_misses_total
 gamba_rate_limited_total
+gamba_load_shed_total{reason}
+gamba_in_flight_requests
+gamba_latency_ewma_ms
 ```
 Exposed at `GET /metrics` in Prometheus text format. No auth required (internal network only in production).
+
+---
+
+## Observability
+
+The backend exposes Prometheus metrics at:
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+For local load testing, `docker-compose.dev.yml` starts Prometheus and Grafana in addition to the application stack:
+
+| Service | Local URL | Purpose |
+|---|---|---|
+| Backend metrics | `http://localhost:8000/metrics` | Raw Prometheus text output from FastAPI |
+| Prometheus | `http://localhost:9090` | Scrapes and stores backend metrics |
+| Grafana | `http://localhost:3000` | Graphs the load testing dashboard |
+
+Start the full local stack:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+Grafana credentials:
+
+```text
+admin / admin
+```
+
+The dashboard is provisioned automatically from `observability/grafana/dashboards/gamba-load-testing.json` and appears under:
+
+```text
+Dashboards -> Gamba -> Gamba Load Testing
+```
+
+Prometheus scrapes the backend every 5 seconds using `observability/prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: gamba-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - backend:8000
+```
+
+The Grafana dashboard contains five panels:
+
+| Panel | Query | What it shows |
+|---|---|---|
+| Backend Requests Per Second By Status | `sum by (status) (rate(gamba_requests_total[1m]))` | Throughput split by HTTP status, such as `200`, `429`, or `500` |
+| Backend p95 Latency | `histogram_quantile(0.95, sum by (le, endpoint) (rate(gamba_request_duration_seconds_bucket[1m])))` | 95th percentile backend response time per endpoint |
+| Redis Cache Hit And Miss Rate | `rate(gamba_cache_hits_total[1m])`, `rate(gamba_cache_misses_total[1m])` | Whether reads are served from Redis or PostgreSQL |
+| Rate Limited Requests | `rate(gamba_rate_limited_total[1m])` | Requests rejected by the token bucket middleware |
+| Load Shed Requests | `sum by (reason) (rate(gamba_load_shed_total[1m]))` | Requests rejected by in-flight or latency-based load shedding |
+
+For scalability benchmarking, use the requests-per-second and p95 latency panels as the main evidence. For overload mitigation, use the rate-limited requests panel to show traffic rejected with `429 Too Many Requests` and the load-shed metric to show traffic rejected with `503 Service Unavailable`.
 
 ---
 
@@ -239,11 +313,20 @@ The frontend is intentionally minimal — the focus of this project is backend s
 docker compose -f docker-compose.dev.yml up -d
 ```
 
+This starts PostgreSQL, Redis, the backend, the frontend, Prometheus, and Grafana. After startup:
+
+```text
+Frontend:   http://localhost:5173
+Backend:    http://localhost:8000
+Prometheus: http://localhost:9090
+Grafana:    http://localhost:3000
+```
+
 ### Backend
 ```bash
 cd backend
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate     # .\.venv\Scripts\Activate.ps1 for Windows
 pip install -r requirements.txt
 cp .env.example .env          # edit if needed
 uvicorn main:app --reload     # http://localhost:8000
@@ -268,55 +351,62 @@ npm run dev                   # http://localhost:5173
   gcloud init
   gcloud auth application-default login
   ```
-- A GCP project with Compute Engine API enabled
+- Docker installed and running locally
+- A GCP project where your account can enable APIs, create Compute Engine VMs, manage IAM bindings, and push to Artifact Registry
 - An SSH key pair (default: `~/.ssh/id_rsa` / `~/.ssh/id_rsa.pub`)
 
-### 1. Provision infrastructure
+### One-command deployment
 ```bash
-cd infrastructure
+# 1 backend node
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 1 e2-micro dev
 
-# Single node (default)
-terraform init
-terraform apply -var="project_id=YOUR_GCP_PROJECT_ID"
+# 3 backend nodes
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-micro dev
 
-# 3-node cluster
-terraform apply -var="project_id=YOUR_GCP_PROJECT_ID" -var="backend_node_count=3"
-
-# 5-node cluster
-terraform apply -var="project_id=YOUR_GCP_PROJECT_ID" -var="backend_node_count=5"
+# 5 backend nodes
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 5 e2-micro dev
 ```
 
+Debugged Eddy's Version:
+```bash
+& "C:\Program Files\Git\bin\bash.exe" scripts/deploy.sh project-9a0a6f54-8a89-47b8-a40 1 e2-micro dev
+```
+
+The script does:
+1. Runs `terraform init`.
+2. Enables required GCP APIs and creates the Artifact Registry repository.
+3. Builds `gamba-backend` and `gamba-frontend-assets` locally with Docker and pushes them to Artifact Registry.
+4. Applies Terraform for the cluster.
+5. Restarts the VMs so startup scripts pull the current images and Nginx gets the current backend list.
+6. Prints the public load-balancer URL.
+
 Terraform creates:
-- 1 `infra` VM (public IP) — runs Nginx, PostgreSQL, and Redis
+- 1 `infra` VM (public IP) — runs Nginx (also handling frontend assets), PostgreSQL and Redis.
 - N `backend-*` VMs (internal only, port 8000)
 - Firewall rules: port 80 public → infra; port 8000/5432/6379 internal only
 
-### 2. Bootstrap VMs
+### Build images only
 ```bash
-# Run once per VM type after provisioning
-bash scripts/bootstrap.sh infra infra
-bash scripts/bootstrap.sh backend-1 backend
-# repeat for backend-2, backend-3, etc.
+bash scripts/build_images.sh YOUR_GCP_PROJECT_ID europe-west3 gamba dev
 ```
 
-### 3. Deploy application
+Use this after the Artifact Registry repository exists if you only changed application code and want to push a new image tag.
+
+### Verify
 ```bash
-# Pass the LB public IP so the frontend build bakes in the correct API URL
 LB_IP=$(terraform -chdir=infrastructure output -raw lb_ip)
-bash scripts/deploy.sh $LB_IP
-```
-
-`deploy.sh` does:
-1. Builds frontend with `VITE_API_URL=http://$LB_IP`
-2. Copies static files to Nginx on the LB VM
-3. Copies backend code to each backend VM and restarts the FastAPI service
-4. Applies the Nginx upstream config (generated from `nginx.conf.tpl` with backend IPs)
-
-### 4. Verify
-```bash
 curl http://$LB_IP/health    # should return node_id; re-run to see it rotate
 curl http://$LB_IP/metrics   # Prometheus output
 ```
+
+When `enable_observability=true` (the default), Terraform also runs Prometheus and Grafana on the infra VM:
+
+```bash
+terraform -chdir=infrastructure output -raw prometheus_url
+terraform -chdir=infrastructure output -raw grafana_url
+```
+
+Grafana is available with `admin / admin` credentials and contains the same `Gamba Load Testing` dashboard used locally. Prometheus scrapes each backend node directly by internal IP, so 1 / 3 / 5 node test runs can be compared from the dashboard.
 
 ### Teardown
 ```bash
@@ -327,15 +417,71 @@ terraform -chdir=infrastructure destroy -var="project_id=YOUR_GCP_PROJECT_ID"
 
 ## Load Testing (K6)
 
-`scripts/load_test.js` runs two scenarios:
+`scripts/load_test.js` runs a read-heavy scenario that ramps 10 → 100 → 500 VUs hitting `GET /api/events?city=Berlin&sport=Football&day=<today>`.
 
-1. **Read-heavy:** ramp 10 → 100 → 500 VUs hitting `GET /api/events?city=Berlin&sport=Football&day=<today>`
-2. **Mixed:** 50% reads (`GET /api/events`), 50% joins (`POST /api/events/{id}/join`)
+The script sends one synthetic `X-Forwarded-For` IP per K6 virtual user. For local Docker Compose load tests, `docker-compose.dev.yml` enables `TRUST_FORWARDED_IPS=true` so the backend rate limiter uses those synthetic IPs instead of treating all requests as coming from `localhost`.
+
+The script also emits custom failure counters:
+
+| Counter | Meaning |
+|---|---|
+| `read_rate_limited` | `GET /api/events` returned `429 Too Many Requests` |
+| `read_load_shed_in_flight` | `GET /api/events` returned `503` from the in-flight request limit |
+| `read_load_shed_latency` | `GET /api/events` returned `503` from latency-based shedding |
+| `read_load_shed_unknown` | `GET /api/events` returned `503` without a recognized shedding reason |
+| `read_client_errors` | `GET /api/events` returned another `4xx` status |
+| `read_server_errors` | `GET /api/events` returned a `5xx` status |
+| `read_unexpected_status` | `GET /api/events` returned a non-200 status outside those groups |
 
 Run against each configuration:
 ```bash
 # Set target to the LB public IP
 k6 run -e BASE_URL=http://$LB_IP scripts/load_test.js
+```
+
+For local testing with the observability dashboard open:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d --build
+k6 run -e BASE_URL=http://localhost:8000 scripts/load_test.js
+```
+
+To print a small sample of failed responses during the run, enable debug output:
+
+```bash
+k6 run -e BASE_URL=http://localhost:8000 -e DEBUG_FAILURES=true scripts/load_test.js
+```
+
+To disable synthetic forwarded IPs and test all traffic as coming from one client IP:
+
+```bash
+k6 run -e BASE_URL=http://localhost:8000 -e SPOOF_IPS=false scripts/load_test.js
+```
+
+
+To isolate in-flight load shedding, set a low concurrency limit and a very high latency threshold:
+
+```yaml
+LOAD_SHEDDING_ENABLED: "true"
+MAX_IN_FLIGHT_REQUESTS: "20"
+MAX_AVG_LATENCY_MS: "999999"
+```
+
+To isolate latency-based load shedding, set a high concurrency limit and a low latency threshold:
+
+```yaml
+LOAD_SHEDDING_ENABLED: "true"
+MAX_IN_FLIGHT_REQUESTS: "999999"
+MAX_AVG_LATENCY_MS: "500"
+LATENCY_SHED_PROBABILITY: "0.5"
+```
+
+To introduce these changes to online deployment adjust these values in infrastructure/main.tf
+
+Then watch:
+
+```text
+http://localhost:3000/d/gamba-load-testing/gamba-load-testing
 ```
 
 Record for each of 1 / 3 / 5 nodes:
@@ -361,6 +507,8 @@ terraform apply -var="project_id=..." -var="backend_node_count=1" -var="machine_
 | `machine_type` | `e2-medium` | GCP machine type for all VMs |
 | `region` | `europe-west3` | GCP region (Frankfurt) |
 | `ssh_public_key_path` | `~/.ssh/id_rsa.pub` | SSH key for VM access |
+| `enable_observability` | `true` | Run Prometheus and Grafana on the infra VM |
+| `observability_source_ranges` | `["0.0.0.0/0"]` | CIDR ranges allowed to access Prometheus `:9090` and Grafana `:3000` |
 
 ---
 
@@ -372,6 +520,12 @@ DATABASE_URL=postgresql://gamba:gamba@<POSTGRES_IP>:5432/gamba
 REDIS_URL=redis://<REDIS_IP>:6379
 JWT_SECRET_KEY=change-me-in-production
 ALLOWED_ORIGINS=http://<LB_IP>
+TRUST_FORWARDED_IPS=false
+LOAD_SHEDDING_ENABLED=false
+MAX_IN_FLIGHT_REQUESTS=100
+MAX_AVG_LATENCY_MS=1500
+LATENCY_SHED_PROBABILITY=0.5
+LATENCY_EWMA_ALPHA=0.1
 ```
 
 ### Frontend (`.env`)

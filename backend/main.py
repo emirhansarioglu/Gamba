@@ -11,6 +11,7 @@ from database import engine
 import models
 import metrics
 from routers import auth, events
+from middleware.load_shedder import LoadSheddingMiddleware
 from middleware.rate_limiter import TokenBucketMiddleware
 
 models.Base.metadata.create_all(bind=engine)
@@ -32,6 +33,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(LoadSheddingMiddleware)
 app.add_middleware(TokenBucketMiddleware)
 
 app.include_router(auth.router)
@@ -45,8 +47,9 @@ async def observe(request: Request, call_next):
     duration = time.monotonic() - start
 
     endpoint = request.url.path
-    metrics.requests_total.labels(request.method, endpoint, str(response.status_code)).inc()
-    metrics.request_duration.labels(endpoint).observe(duration)
+    status = str(response.status_code)
+    metrics.requests_total.labels(request.method, endpoint, status).inc()
+    metrics.request_duration.labels(endpoint, status).observe(duration)
 
     logger.info(json.dumps({
         "node_id": NODE_ID,
