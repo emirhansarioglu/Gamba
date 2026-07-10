@@ -24,6 +24,7 @@ x-backend-common: &backend-common
 services:
   postgres:
     image: postgres:16
+    command: postgres -c track_io_timing=on
     environment:
       POSTGRES_USER: gamba
       POSTGRES_PASSWORD: gamba
@@ -76,6 +77,17 @@ services:
     depends_on:
       - backend1
 
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://gamba:gamba@postgres:5432/gamba?sslmode=disable
+      PG_EXPORTER_EXTEND_QUERY_PATH: /etc/postgres_exporter/queries.yml
+    volumes:
+      - ./observability/postgres-exporter-queries.yml:/etc/postgres_exporter/queries.yml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   prometheus:
     image: prom/prometheus:v2.55.1
     ports:
@@ -84,6 +96,7 @@ services:
       - ./observability/${PROMETHEUS_CONFIG:-prometheus-loadtest-1.yml}:/etc/prometheus/prometheus.yml:ro
     depends_on:
       - backend1
+      - postgres-exporter
 
   grafana:
     image: grafana/grafana:11.3.0

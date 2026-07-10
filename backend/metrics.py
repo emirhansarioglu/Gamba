@@ -28,3 +28,19 @@ latency_ewma_ms = Gauge(
     "gamba_latency_ewma_ms",
     "Exponentially weighted moving average of backend request latency in milliseconds",
 )
+
+db_query_duration = Histogram(
+    "gamba_db_query_duration_seconds",
+    "Database cursor execution duration in seconds",
+    ["operation"],
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5),
+)
+db_queries = Counter(
+    "gamba_db_queries_total",
+    "Database queries executed by the backend",
+    ["operation", "outcome"],
+)
+db_pool_checked_out = Gauge(
+    "gamba_db_pool_checked_out",
+    "Database connections currently checked out from this backend pool",
+)

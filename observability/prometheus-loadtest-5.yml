@@ -12,3 +12,8 @@ scrape_configs:
           - backend3:8000
           - backend4:8000
           - backend5:8000
+
+  - job_name: postgres-exporter
+    static_configs:
+      - targets:
+          - postgres-exporter:9187
