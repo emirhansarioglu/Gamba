@@ -683,6 +683,28 @@ Re-run the same tests with `machine_type=e2-standard-2` instead of the default `
 terraform apply -var="project_id=..." -var="backend_node_count=1" -var="machine_type=e2-standard-2"
 ```
 
+#### Results on the scaled-up machines
+
+In the following you can see the results on the scaled-up systems (`e2-standard-2`) from (a) 1 backend node to (b) 3 backend nodes to (c) 5 backend nodes:
+
+| Nodes | Successful reads (mean) | Successful reads (peak) | p95 latency (mean) | p95 latency (peak) | 503 load shed (mean / peak) |
+|---|---|---|---|---|---|
+| (a) 1 | 55.3 req/s | 182 req/s | 5.73 s | 10 s | 31.7 / 116 req/s (in-flight) |
+| (b) 3 | 283 req/s | 491 req/s | 1.83 s | 3.40 s | 189 / 436 req/s (in-flight) |
+| (c) 5 | 554 req/s | 846 req/s | 1.56 s | 2.36 s | 111 / 245 req/s (in-flight) |
+
+**(a) 1 node, scaled up** — vertical scaling roughly doubles the single node's throughput compared to the small-machine run (peak ~182 vs ~99 req/s), but it does not change the shape of the problem: the node still saturates, p95 spikes to 10 s, and in-flight shedding kicks in. One bigger machine is not a substitute for more machines.
+
+![1 backend node, scaled up](docs/results/loadtest-1-node-scaled-up.jpeg)
+
+**(b) 3 nodes, scaled up** — throughput scales to ~491 req/s peak and p95 drops back toward the 2 s threshold. Shedding is still substantial at peak load, which shows the cluster running close to its protective limits rather than failing.
+
+![3 backend nodes, scaled up](docs/results/loadtest-3-nodes-scaled-up.jpeg)
+
+**(c) 5 nodes, scaled up** — the key result of the bonus: throughput keeps scaling to ~846 req/s peak with the *lowest* p95 (2.36 s peak) and *less* shedding than the 3-node run. On the small machines, 5 nodes performed worse than 3 because the shared stateful tier saturated; on the larger machines that bottleneck moves out far enough for the fifth node to pay off. Horizontal and vertical scaling complement each other — scaling out multiplies capacity only while the shared components can keep up, and scaling up is what buys them that headroom.
+
+![5 backend nodes, scaled up](docs/results/loadtest-5-nodes-scaled-up.jpeg)
+
 ---
 
 ## Infrastructure Variables
@@ -760,6 +782,6 @@ For local dev, both default to `localhost` if the env file is absent.
 | Document | Contents |
 |---|---|
 | `docs/scalability-plan.md` | Original planning document: hypothesis, architecture proposal, component responsibilities, test plan. The README reflects the as-built system where the two differ. |
-| `docs/results/` | Grafana screenshots from the 1 / 3 / 5 node load test runs, embedded in the Load Test Results section above. |
+| `docs/results/` | Grafana screenshots from the 1 / 3 / 5 node load test runs on both machine types, embedded in the Load Test Results section above. |
 
 Presentation slides will be added to `docs/` separately.
