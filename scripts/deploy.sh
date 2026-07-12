@@ -42,6 +42,21 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TF_DIR="${ROOT_DIR}/infrastructure"
 
+SSH_PUBLIC_KEY_PATH="${SSH_PUBLIC_KEY_PATH:-}"
+if [[ -z "$SSH_PUBLIC_KEY_PATH" ]]; then
+  for candidate in ~/.ssh/id_ed25519.pub ~/.ssh/id_rsa.pub; do
+    if [[ -f "$candidate" ]]; then
+      SSH_PUBLIC_KEY_PATH="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "$SSH_PUBLIC_KEY_PATH" ]]; then
+  echo "No SSH public key found in ~/.ssh"
+  echo "Generate one or set SSH_PUBLIC_KEY_PATH=/path/to/key.pub and re-run."
+  exit 1
+fi
+
 TF_VARS=(
   -var="project_id=${PROJECT_ID}"
   -var="region=${REGION}"
@@ -50,6 +65,7 @@ TF_VARS=(
   -var="backend_node_count=${BACKEND_NODE_COUNT}"
   -var="machine_type=${MACHINE_TYPE}"
   -var="image_tag=${IMAGE_TAG}"
+  -var="ssh_public_key_path=${SSH_PUBLIC_KEY_PATH}"
 )
 
 echo "==> Initializing Terraform"
