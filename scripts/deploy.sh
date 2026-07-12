@@ -160,43 +160,7 @@ GRAFANA_URL="$(terraform -chdir="${TF_DIR}" output -raw grafana_url 2>/dev/null 
 APP_URL="http://${LB_IP}"
 
 echo ""
-echo "==> Smoke checking public load balancer"
-for attempt in {1..30}; do
-  if curl -fsS "${APP_URL}/" >/dev/null && curl -fsS "${APP_URL}/health" >/dev/null; then
-    echo "Frontend and backend health are reachable through nginx."
-    break
-  fi
-
-  if [[ "$attempt" -eq 30 ]]; then
-    echo "Warning: public nginx did not pass smoke checks yet. Startup may still be finishing." >&2
-    break
-  fi
-
-  sleep 5
-done
-
-if [[ -n "$GRAFANA_URL" && "$GRAFANA_URL" != "null" ]]; then
-  echo ""
-  echo "==> Smoke checking Grafana"
-  for attempt in {1..30}; do
-    dashboard_search="$(
-      curl -fsS -u admin:admin "${GRAFANA_URL}/api/search?query=Gamba%20Load%20Testing" 2>/dev/null || true
-    )"
-
-    if curl -fsS "${GRAFANA_URL}/api/health" >/dev/null && [[ "$dashboard_search" == *"Gamba Load Testing"* ]]; then
-      echo "Grafana health and Gamba dashboard are reachable."
-      break
-    fi
-
-    if [[ "$attempt" -eq 30 ]]; then
-      echo "Warning: Grafana did not pass smoke checks yet. Startup may still be finishing." >&2
-      break
-    fi
-
-    sleep 5
-  done
-fi
-
+echo "Infra VM is loading the containers from artifact registery. This will take 3-5 minutes"
 echo ""
 echo "==> Deployment complete"
 echo "App:        ${APP_URL}"
