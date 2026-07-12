@@ -100,7 +100,6 @@ gamba/
 │   └── load_test_db_heavy.js         # K6 load test script (write/DB-heavy)
 ├── observability/                    # Prometheus configs, Grafana provisioning, loadtest Nginx confs,
 │                                     # postgres-exporter queries
-├── docker-compose.dev.yml            # Local app, database, cache, Prometheus, and Grafana
 ├── docker-compose.loadtest.yml       # Local 5-backend stack with Nginx LB and postgres-exporter
 └── README.md
 ```
@@ -241,7 +240,7 @@ The backend exposes Prometheus metrics at:
 curl http://localhost:8000/metrics
 ```
 
-For local load testing, `docker-compose.dev.yml` starts Prometheus and Grafana in addition to the application stack:
+For local load testing, `docker-compose.loadtest.yml` starts Prometheus and Grafana in addition to the application stack:
 
 | Service | Local URL | Purpose |
 |---|---|---|
@@ -252,7 +251,7 @@ For local load testing, `docker-compose.dev.yml` starts Prometheus and Grafana i
 Start the full local stack:
 
 ```bash
-docker compose -f docker-compose.dev.yml up -d --build
+docker compose -f docker-compose.loadtest.yml up -d --build
 ```
 
 Grafana credentials:
@@ -294,7 +293,7 @@ The dashboard also contains additional panels for deeper analysis:
 
 - **Backend CPU By Node** and **Backend Memory By Node** — from the `process_*` metrics that `prometheus_client` exports by default, so per-node resource usage works with no extra exporter.
 - **Database Query p95 By Operation** and **Database Query Throughput** — from the backend's `gamba_db_*` metrics.
-- **Postgres panels** (Connections, Connection Utilization, Locks, Lock Waits, Transactions, Buffer Cache Hit Ratio, Row Work, I/O Time) — from `postgres-exporter` metrics. These only show data when a postgres-exporter is running, which `docker-compose.loadtest.yml` provides; the plain `docker-compose.dev.yml` stack does not include one.
+- **Postgres panels** (Connections, Connection Utilization, Locks, Lock Waits, Transactions, Buffer Cache Hit Ratio, Row Work, I/O Time) — from `postgres-exporter` metrics. These only show data when a postgres-exporter is running, which `docker-compose.loadtest.yml` provides.
 
 For scalability benchmarking, use the requests-per-second and p95 latency panels as the main evidence. For overload mitigation, use the rate-limited requests panel to show traffic rejected with `429 Too Many Requests` and the load-shed metric to show traffic rejected with `503 Service Unavailable`.
 
@@ -331,34 +330,15 @@ The frontend is intentionally minimal — the focus of this project is backend s
 
 ### Start local services
 ```bash
-docker compose -f docker-compose.dev.yml up -d
+docker compose -f docker-compose.loadtest.yml up -d
 ```
 
 This starts PostgreSQL, Redis, the backend, the frontend, Prometheus, and Grafana. After startup:
 
 ```text
-Frontend:   http://localhost:5173
-Backend:    http://localhost:8000
+Frontend, Backend:    http://localhost:8000
 Prometheus: http://localhost:9090
 Grafana:    http://localhost:3000
-```
-
-### Backend
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate     # .\.venv\Scripts\Activate.ps1 for Windows
-pip install -r requirements.txt
-cp .env.example .env          # edit if needed
-uvicorn main:app --reload     # http://localhost:8000
-```
-
-### Frontend
-```bash
-cd frontend
-npm install
-cp .env.example .env          # VITE_API_URL=http://localhost:8000
-npm run dev                   # http://localhost:5173
 ```
 
 ---
@@ -440,7 +420,7 @@ terraform -chdir=infrastructure destroy -var="project_id=YOUR_GCP_PROJECT_ID"
 
 `scripts/load_test.js` runs a read-heavy scenario that ramps 10 → 100 → 500 VUs hitting `GET /api/events?city=Berlin&sport=Football&day=<today>`.
 
-The script sends one synthetic `X-Forwarded-For` IP per K6 virtual user. For local Docker Compose load tests, `docker-compose.dev.yml` enables `TRUST_FORWARDED_IPS=true` so the backend rate limiter uses those synthetic IPs instead of treating all requests as coming from `localhost`.
+The script sends one synthetic `X-Forwarded-For` IP per K6 virtual user. For local Docker Compose load tests, `docker-compose.loadtest.yml` enables `TRUST_FORWARDED_IPS=true` so the backend rate limiter uses those synthetic IPs instead of treating all requests as coming from `localhost`.
 
 The script also emits custom failure counters:
 
@@ -463,7 +443,7 @@ k6 run -e BASE_URL=http://$LB_IP scripts/load_test.js
 For local testing with the observability dashboard open:
 
 ```bash
-docker compose -f docker-compose.dev.yml up -d --build
+docker compose -f docker-compose.loadtest.yml up -d --build
 k6 run -e BASE_URL=http://localhost:8000 scripts/load_test.js
 ```
 

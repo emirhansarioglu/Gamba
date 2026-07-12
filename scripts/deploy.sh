@@ -114,3 +114,4 @@ if [[ -n "$GRAFANA_URL" && "$GRAFANA_URL" != "null" ]]; then
   echo "Grafana:    ${GRAFANA_URL}"
   echo "Grafana login: admin / admin"
 fi
+echo "For load testing you can run this command: k6 run -e BASE_URL=http://${LB_IP} scripts/load_test.js"
