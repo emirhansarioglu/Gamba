@@ -643,7 +643,6 @@ For local dev, both default to `localhost` if the env file is absent.
 | Document | Contents |
 |---|---|
 | `docs/scalability-plan.md` | Original planning document: hypothesis, architecture proposal, component responsibilities, test plan. The README reflects the as-built system where the two differ. |
-| `docs/scalability-architecture.html` | Architecture diagram (HTML export). |
 | `docs/results/` | Grafana screenshots from the 1 / 3 / 5 node load test runs, embedded in the Load Test Results section above. |
 
 Presentation slides will be added to `docs/` separately.
