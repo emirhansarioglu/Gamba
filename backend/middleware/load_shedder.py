@@ -14,7 +14,7 @@ LOAD_SHEDDING_ENABLED = os.getenv("LOAD_SHEDDING_ENABLED", "false").lower() == "
 MAX_IN_FLIGHT_REQUESTS = int(os.getenv("MAX_IN_FLIGHT_REQUESTS", "200"))
 MAX_AVG_LATENCY_MS = float(os.getenv("MAX_AVG_LATENCY_MS", "1200"))
 LATENCY_SHED_PROBABILITY = float(os.getenv("LATENCY_SHED_PROBABILITY", "0.5"))
-LATENCY_EWMA_ALPHA = float(os.getenv("LATENCY_EWMA_ALPHA", "0.1"))
+LATENCY_EWMA_ALPHA = float(os.getenv("LATENCY_EWMA_ALPHA", "0.2"))
 BYPASS_PATHS = {"/health", "/metrics"}
 
 
