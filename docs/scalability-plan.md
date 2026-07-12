@@ -2,6 +2,8 @@
 
 This document defines the intended scope for the prototyping assignment. It is planning material for the repository documentation and should be adapted into your own presentation wording.
 
+> **Status note (as built):** the README is authoritative for the final system. Where this plan and the implementation differ: the shared Redis-backed rate/overload counters proposed below were **not** implemented — rate limiting and load shedding are per-node and in-memory (documented as Known Limitation #1 in the README). Cache invalidation across all list-query variants and row-level locking on join (adjustments 2 and 3 below) **were** implemented.
+
 ## Goal
 
 Gamba is a sports event booking application used to evaluate backend scalability. The main hypothesis is:
@@ -20,7 +22,7 @@ flowchart LR
     N --> B2[FastAPI backend node 2<br/>stateless]
     N --> B3[FastAPI backend node N<br/>stateless]
 
-    B1 --> R[(Redis<br/>shared cache + global overload counters)]
+    B1 --> R[(Redis<br/>shared cache; global overload counters were planned but not implemented)]
     B2 --> R
     B3 --> R
 
@@ -47,7 +49,7 @@ Deployment variants:
 | Nginx | No | No | Public entry point, static frontend hosting, round-robin reverse proxy |
 | FastAPI backend | Yes, 1/3/5 nodes | No | Auth, event API, cache lookup, overload checks, metrics |
 | PostgreSQL | No | Yes | Persistent users, events, participations |
-| Redis | No | Yes, ephemeral | Shared read-through cache and optional shared rate/load counters |
+| Redis | No | Yes, ephemeral | Shared read-through cache (shared rate/load counters were planned but not implemented) |
 | K6 | No | No | Reproducible load generation |
 
 ## Requirement Mapping
