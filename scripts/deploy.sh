@@ -83,6 +83,21 @@ configure_load_shedding() {
 
 configure_load_shedding
 
+SSH_PUBLIC_KEY_PATH="${SSH_PUBLIC_KEY_PATH:-}"
+if [[ -z "$SSH_PUBLIC_KEY_PATH" ]]; then
+  for candidate in ~/.ssh/id_ed25519.pub ~/.ssh/id_rsa.pub; do
+    if [[ -f "$candidate" ]]; then
+      SSH_PUBLIC_KEY_PATH="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "$SSH_PUBLIC_KEY_PATH" ]]; then
+  echo "No SSH public key found in ~/.ssh"
+  echo "Generate one or set SSH_PUBLIC_KEY_PATH=/path/to/key.pub and re-run."
+  exit 1
+fi
+
 TF_VARS=(
   -var="project_id=${PROJECT_ID}"
   -var="region=${REGION}"
@@ -102,6 +117,7 @@ TF_VARS=(
   -var="cpu_ewma_alpha=${CPU_EWMA_ALPHA}"
   -var="cpu_sample_interval_seconds=${CPU_SAMPLE_INTERVAL_SECONDS}"
   -var="max_shed_probability=${MAX_SHED_PROBABILITY}"
+  -var="ssh_public_key_path=${SSH_PUBLIC_KEY_PATH}"
 )
 
 echo "==> GCP target: ${BACKEND_NODE_COUNT} backend node(s), ${MACHINE_TYPE}, image tag ${IMAGE_TAG}"
@@ -196,3 +212,4 @@ if [[ -n "$GRAFANA_URL" && "$GRAFANA_URL" != "null" ]]; then
   echo "Grafana:    ${GRAFANA_URL}"
   echo "Grafana login: admin / admin"
 fi
+echo "For load testing you can run this command: k6 run -e BASE_URL=http://${LB_IP} scripts/load_test.js"
