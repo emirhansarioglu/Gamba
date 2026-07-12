@@ -40,7 +40,7 @@ gcloud auth configure-docker "${REGISTRY_HOST}" --quiet
 
 echo ""
 echo "==> Building backend image locally"
-docker build -t "${BACKEND_IMAGE}" "${ROOT_DIR}/backend"
+docker build --platform linux/amd64 -t "${BACKEND_IMAGE}" "${ROOT_DIR}/backend"
 
 echo ""
 echo "==> Pushing backend image"
@@ -48,7 +48,7 @@ docker push "${BACKEND_IMAGE}"
 
 echo ""
 echo "==> Building frontend static asset image locally"
-docker build -t "${FRONTEND_IMAGE}" "${ROOT_DIR}/frontend"
+docker build --platform linux/amd64 -t "${FRONTEND_IMAGE}" "${ROOT_DIR}/frontend"
 
 echo ""
 echo "==> Pushing frontend static asset image"

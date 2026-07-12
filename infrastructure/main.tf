@@ -154,7 +154,7 @@ resource "google_compute_instance" "backend" {
   }
 
   metadata = {
-    ssh-keys = "gamba:${file(var.ssh_public_key_path)}"
+    ssh-keys = "gamba:${local.ssh_public_key_content}"
   }
 
   metadata_startup_script = replace(templatefile("${path.module}/startup-backend.sh.tpl", {
@@ -211,7 +211,7 @@ resource "google_compute_instance" "infra" {
   }
 
   metadata = {
-    ssh-keys = "gamba:${file(var.ssh_public_key_path)}"
+    ssh-keys = "gamba:${local.ssh_public_key_content}"
   }
 
   metadata_startup_script = replace(templatefile("${path.module}/startup-infra.sh.tpl", {

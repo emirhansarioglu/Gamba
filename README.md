@@ -16,7 +16,7 @@ Gamba is a web-only sports venue booking application. Players can browse and joi
 | 3 | Overload mitigation (no library) | Hand-rolled **token bucket rate limiter** in `middleware/rate_limiter.py` — no library used |
 | 4a | Additional strategy 1 | **Redis read-through cache** on `GET /events`, 30s TTL, invalidated on writes |
 | 4b | Additional strategy 2 | **Prometheus observability** — `/metrics` endpoint with request counters, latency histograms, cache hit/miss counters |
-| Bonus | Vertical scaling evaluation | Re-run load tests on `e2-medium` vs `e2-standard-2` for 1/3/5 node configs |
+| Bonus | Vertical scaling evaluation | Re-run load tests on the default `e2-micro` vs `e2-standard-2` for 1/3/5 node configs |
 
 ---
 
@@ -73,27 +73,34 @@ gamba/
 │   │   ├── auth.py                   # POST /api/auth/register, POST /api/auth/login
 │   │   └── events.py                 # GET/POST /api/events, POST /api/events/{id}/join
 │   ├── middleware/
-│   │   └── rate_limiter.py           # Hand-rolled token bucket per IP
+│   │   ├── rate_limiter.py           # Hand-rolled token bucket per IP
+│   │   └── load_shedder.py           # In-flight and latency-based load shedding
 │   ├── auth_utils.py                 # bcrypt hashing, JWT encode/decode
 │   ├── cache.py                      # Redis get/set/delete helpers
-│   ├── metrics.py                    # Prometheus counters + histograms
-│   ├── database.py                   # SQLAlchemy engine + session (env-var config)
+│   ├── metrics.py                    # Prometheus counters, gauges + histograms
+│   ├── database.py                   # SQLAlchemy engine + session, DB query/pool metrics
 │   ├── models.py                     # SQLAlchemy ORM models
 │   ├── schemas.py                    # Pydantic request/response schemas
 │   ├── .env.example
 │   └── requirements.txt
 ├── infrastructure/
 │   ├── main.tf                       # VMs, VPC, firewall rules
-│   ├── variables.tf                  # backend_node_count, machine_type, region
+│   ├── variables.tf                  # backend_node_count, machine_type, region, images, jwt_secret_key
+│   ├── locals.tf                     # Derived names and image URLs
 │   ├── nginx.conf.tpl                # Nginx upstream template (IPs injected by Terraform)
-│   └── outputs.tf                    # LB public IP, backend IPs
+│   ├── startup-infra.sh.tpl          # Infra VM startup script (Nginx, PostgreSQL, Redis, observability)
+│   ├── startup-backend.sh.tpl        # Backend VM startup script (pulls image, writes .env)
+│   └── outputs.tf                    # LB public IP, backend IPs, observability URLs
 ├── scripts/
 │   ├── build_images.sh               # Build and push Docker images to Artifact Registry
 │   ├── deploy.sh                     # Provision registry, build images, deploy the GCP cluster
 │   ├── bootstrap.sh                  # Legacy VM bootstrap script from the pre-container flow
-│   └── load_test.js                  # K6 load test script
-├── observability/                    # Prometheus scrape config and Grafana dashboard provisioning
-├── docker-compose.dev.yml            # Local app, database, cache, Prometheus, and Grafana
+│   ├── loadtest_stack.sh             # Bring up the local 1/3/5-node load-test stack
+│   ├── load_test.js                  # K6 load test script (read-heavy)
+│   └── load_test_db_heavy.js         # K6 load test script (write/DB-heavy)
+├── observability/                    # Prometheus configs, Grafana provisioning, loadtest Nginx confs,
+│                                     # postgres-exporter queries
+├── docker-compose.loadtest.yml       # Local 5-backend stack with Nginx LB and postgres-exporter
 └── README.md
 ```
 
@@ -159,14 +166,16 @@ POST /api/events
      auth: organizer JWT required
      body: {city, address, sport, level, event_time, capacity}
      → 201 event object
-     → invalidates Redis key for that city/sport/day
+     → invalidates all matching event-list keys (every city/sport/day
+       combination for the event, including the "all" catch-all variants)
 
 POST /api/events/{id}/join
      auth: player JWT required
      → 200 {joined_count, capacity}
      → 409 "Already joined this event" if the player already joined
      → 409 "Event is full" if joined_count >= capacity
-     → records a row in event_participations and invalidates the Redis key
+     → records a row in event_participations and invalidates the matching
+       event-list keys (including the "all" catch-all variants)
 ```
 
 ---
@@ -199,10 +208,10 @@ Rate limiting and load shedding intentionally use different status codes: `429` 
 ### Req 4a — Redis Read-Through Cache
 
 `cache.py`:
-- Cache key: `events:{city}:{sport}:{day}`
+- Cache key: `events:{city}:{sport}:{day}` — omitted filters use `all` (e.g. `events:Berlin:all:all`)
 - TTL: 30 seconds
 - Read: check Redis → hit: return cached JSON; miss: query PostgreSQL, store in Redis
-- Write (`POST /events`, `POST /events/{id}/join`): delete matching Redis key
+- Write (`POST /events`, `POST /events/{id}/join`): delete every key combination that could contain the event — all 8 city/sport/day permutations including the `all` catch-alls
 - Prometheus counters: `gamba_cache_hits_total`, `gamba_cache_misses_total`
 
 ### Req 4b — Prometheus Observability
@@ -210,15 +219,18 @@ Rate limiting and load shedding intentionally use different status codes: `429` 
 `metrics.py`:
 ```
 gamba_requests_total{method, endpoint, status}
-gamba_request_duration_seconds{endpoint}
+gamba_request_duration_seconds{endpoint, status}
 gamba_cache_hits_total
 gamba_cache_misses_total
 gamba_rate_limited_total
 gamba_load_shed_total{reason}
 gamba_in_flight_requests
 gamba_latency_ewma_ms
+gamba_db_query_duration_seconds{operation}
+gamba_db_queries_total{operation, outcome}
+gamba_db_pool_checked_out
 ```
-Exposed at `GET /metrics` in Prometheus text format. No auth required (internal network only in production).
+The `gamba_db_*` metrics are emitted by SQLAlchemy event hooks in `database.py` (per-query duration and success/error counts by SQL operation, plus connections currently checked out of the pool). Exposed at `GET /metrics` in Prometheus text format. No auth required (internal network only in production).
 
 ---
 
@@ -230,7 +242,7 @@ The backend exposes Prometheus metrics at:
 curl http://localhost:8000/metrics
 ```
 
-For local load testing, `docker-compose.dev.yml` starts Prometheus and Grafana in addition to the application stack:
+For local load testing, `docker-compose.loadtest.yml` starts Prometheus and Grafana in addition to the application stack:
 
 | Service | Local URL | Purpose |
 |---|---|---|
@@ -241,7 +253,7 @@ For local load testing, `docker-compose.dev.yml` starts Prometheus and Grafana i
 Start the full local stack:
 
 ```bash
-docker compose -f docker-compose.dev.yml up -d --build
+docker compose -f docker-compose.loadtest.yml up -d --build
 ```
 
 Grafana credentials:
@@ -249,6 +261,8 @@ Grafana credentials:
 ```text
 admin / admin
 ```
+
+Anonymous access is also enabled locally with the `Viewer` role, so the dashboard can be opened without logging in.
 
 The dashboard is provisioned automatically from `observability/grafana/dashboards/gamba-load-testing.json` and appears under:
 
@@ -285,9 +299,9 @@ Additional panels below the first rows show Postgres, Redis, rate limiting, memo
 ## Authentication
 
 1. Register: `POST /api/auth/register` → bcrypt hash stored, JWT returned on login
-2. Login: `POST /api/auth/login` → JWT `{user_id, username, role}` returned
+2. Login: `POST /api/auth/login` → JWT `{user_id, username, role}` returned, valid for 7 days (`exp` claim set in `auth_utils.py`)
 3. Frontend stores JWT in `localStorage`, injects as `Authorization: Bearer <token>` via Axios interceptor
-4. Backend decodes JWT on protected routes, checks role
+4. Backend decodes JWT on protected routes (expired or invalid tokens get `401`), checks role
 
 No session state on server — nodes are fully stateless.
 
@@ -313,34 +327,15 @@ The frontend is intentionally minimal — the focus of this project is backend s
 
 ### Start local services
 ```bash
-docker compose -f docker-compose.dev.yml up -d
+docker compose -f docker-compose.loadtest.yml up -d
 ```
 
 This starts PostgreSQL, Redis, the backend, the frontend, Prometheus, and Grafana. After startup:
 
 ```text
-Frontend:   http://localhost:5173
-Backend:    http://localhost:8000
+Frontend, Backend:    http://localhost:8000
 Prometheus: http://localhost:9090
 Grafana:    http://localhost:3000
-```
-
-### Backend
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate     # .\.venv\Scripts\Activate.ps1 for Windows
-pip install -r requirements.txt
-cp .env.example .env          # edit if needed
-uvicorn main:app --reload     # http://localhost:8000
-```
-
-### Frontend
-```bash
-cd frontend
-npm install
-cp .env.example .env          # VITE_API_URL=http://localhost:8000
-npm run dev                   # http://localhost:5173
 ```
 
 ---
@@ -475,7 +470,7 @@ During setup, k6 prints a line like:
 Setup completed: authenticated 1000/1000 users in 42.31s with batch size 25
 ```
 
-The script sends one synthetic `X-Forwarded-For` IP per K6 virtual user. For local Docker Compose load tests, `docker-compose.dev.yml` enables `TRUST_FORWARDED_IPS=true` so the backend rate limiter uses those synthetic IPs instead of treating all requests as coming from `localhost`.
+The script sends one synthetic `X-Forwarded-For` IP per K6 virtual user. For local Docker Compose load tests, `docker-compose.loadtest.yml` enables `TRUST_FORWARDED_IPS=true` so the backend rate limiter uses those synthetic IPs instead of treating all requests as coming from `localhost`.
 
 The script also emits custom failure counters:
 
@@ -534,7 +529,7 @@ If setup starts producing `EOF`, connection resets, or high auth failures, reduc
 For local testing with the observability dashboard open:
 
 ```bash
-docker compose -f docker-compose.dev.yml up -d --build
+docker compose -f docker-compose.loadtest.yml up -d --build
 k6 run -e BASE_URL=http://localhost:8000 -e TARGET_VUS=500 -e AUTH_USERS=500 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=local500 scripts/load_test.js
 ```
 
@@ -562,6 +557,12 @@ To disable synthetic forwarded IPs and test all traffic as coming from one clien
 
 ```bash
 k6 run -e BASE_URL=http://localhost:8000 -e TARGET_VUS=500 -e AUTH_USERS=500 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=no_spoof500 -e SPOOF_IPS=false scripts/load_test.js
+```
+
+To change the peak VU count (default 500):
+
+```bash
+k6 run -e BASE_URL=http://localhost:8000 -e TARGET_VUS=200 scripts/load_test.js
 ```
 
 
@@ -619,7 +620,7 @@ Record for each of 1 / 3 / 5 nodes:
 - Error rate (429s, 5xx)
 
 ### Bonus — Vertical Scaling
-Re-run the same tests with `machine_type=e2-standard-2` instead of `e2-medium` and compare results across all six configurations (2 machine types × 3 node counts).
+Re-run the same tests with `machine_type=e2-standard-2` instead of the default `e2-micro` and compare results across all six configurations (2 machine types × 3 node counts).
 
 ```bash
 terraform apply -var="project_id=..." -var="backend_node_count=1" -var="machine_type=e2-standard-2"
@@ -635,15 +636,27 @@ terraform apply -var="project_id=..." -var="backend_node_count=1" -var="machine_
 | `backend_node_count` | `1` | Number of backend VMs (1, 3, or 5) |
 | `machine_type` | `e2-micro` | GCP machine type for all VMs; use `e2-standard-2` for final performance runs |
 | `region` | `europe-west3` | GCP region (Frankfurt) |
+| `zone` | `europe-west3-a` | GCP zone |
 | `ssh_public_key_path` | `~/.ssh/id_rsa.pub` | SSH key for VM access |
+| `artifact_repo_id` | `gamba` | Artifact Registry Docker repository name |
+| `image_tag` | `dev` | Tag for the backend and frontend-assets images |
+| `nginx_image` | `nginx:1.27-alpine` | Nginx load balancer image pulled by the infra VM |
+| `postgres_image` | `postgres:16` | PostgreSQL image pulled by the infra VM |
+| `redis_image` | `redis:7` | Redis image pulled by the infra VM |
 | `enable_observability` | `true` | Run Prometheus and Grafana on the infra VM |
+| `prometheus_image` | `prom/prometheus:v2.55.1` | Prometheus image pulled by the infra VM |
+| `grafana_image` | `grafana/grafana:11.3.0` | Grafana image pulled by the infra VM |
 | `observability_source_ranges` | `["0.0.0.0/0"]` | CIDR ranges allowed to access Prometheus `:9090` and Grafana `:3000` |
+| `jwt_secret_key` | `gamba-production-secret` | JWT signing secret written to each backend VM's `.env` — override for any real deployment (see Known Limitations) |
 
 ---
 
 ## Environment Variables
 
 ### Backend (`.env`)
+
+Values below mirror `backend/.env.example`, which is tuned for local Docker Compose load testing (forwarded IPs trusted, load shedding on):
+
 ```
 DATABASE_URL=postgresql://gamba:gamba@<POSTGRES_IP>:5432/gamba
 REDIS_URL=redis://<REDIS_IP>:6379
@@ -663,6 +676,8 @@ CPU_SAMPLE_INTERVAL_SECONDS=1
 MAX_SHED_PROBABILITY=1.0
 ```
 
+In code, `TRUST_FORWARDED_IPS` and `LOAD_SHEDDING_ENABLED` both default to `false` when unset.
+
 ### Frontend (`.env`)
 ```
 VITE_API_URL=http://<LB_IP>
@@ -675,7 +690,8 @@ For local dev, both default to `localhost` if the env file is absent.
 ## Known Limitations
 
 1. **Rate limiter is per-process:** each backend node has its own in-memory bucket per IP. With N nodes a client gets 60 × N requests/second before hitting any limit. A production system would use a shared Redis counter.
-2. **Redis is a single point of failure:** no replication. If the Redis VM goes down, all reads fall through to PostgreSQL.
-3. **Cache invalidation is exact-key only:** deleting `events:Berlin:Football:2026-07-10` does not invalidate `events:Berlin:all:2026-07-10`. Stale data possible for catch-all queries.
-4. **JWTs do not expire:** tokens are valid indefinitely. A production system would use short-lived tokens with refresh.
-5. **PostgreSQL is not scaled:** it is the bottleneck at very high write load. Outside the scope of this assignment.
+2. **Redis is a single point of failure:** no replication, and cache errors are not caught — if Redis is unreachable, `GET /api/events` fails with a `500` rather than falling back to PostgreSQL. A production system would catch cache errors and degrade to direct database reads.
+3. **Cache invalidation uses a hand-maintained key list:** writes delete all 8 city/sport/day key permutations (including the `all` catch-alls), so list caches stay consistent — but the list of permutations is hard-coded and must be kept in sync if new filters are added. A production system would use key tagging or versioned namespaces.
+4. **JWTs are long-lived with no refresh or revocation:** tokens expire after 7 days, but there is no refresh flow and no way to revoke a token before it expires. A production system would use short-lived access tokens with refresh tokens.
+5. **JWT signing secret has committed defaults:** `auth_utils.py` falls back to a hard-coded development secret, and the Terraform variable `jwt_secret_key` defaults to a value committed in this repository, which is what a deployment uses unless overridden. Acceptable for the assignment demo; any real deployment must supply its own secret.
+6. **PostgreSQL is not scaled:** it is the bottleneck at very high write load. Outside the scope of this assignment.
