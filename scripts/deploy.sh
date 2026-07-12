@@ -56,13 +56,13 @@ configure_load_shedding() {
       export MAX_SHED_PROBABILITY="${MAX_SHED_PROBABILITY:-0.30}"
       ;;
     3)
-      export IN_FLIGHT_SOFT_LIMIT="${IN_FLIGHT_SOFT_LIMIT:-10}"
-      export IN_FLIGHT_HARD_LIMIT="${IN_FLIGHT_HARD_LIMIT:-35}"
-      export MAX_AVG_LATENCY_MS="${MAX_AVG_LATENCY_MS:-1200}"
-      export LATENCY_SHED_PROBABILITY="${LATENCY_SHED_PROBABILITY:-0.5}"
-      export MAX_PROCESS_CPU_PERCENT="${MAX_PROCESS_CPU_PERCENT:-150}"
-      export CPU_SHED_PROBABILITY="${CPU_SHED_PROBABILITY:-0.2}"
-      export MAX_SHED_PROBABILITY="${MAX_SHED_PROBABILITY:-0.95}"
+      export IN_FLIGHT_SOFT_LIMIT="${IN_FLIGHT_SOFT_LIMIT:-40}"
+      export IN_FLIGHT_HARD_LIMIT="${IN_FLIGHT_HARD_LIMIT:-140}"
+      export MAX_AVG_LATENCY_MS="${MAX_AVG_LATENCY_MS:-3500}"
+      export LATENCY_SHED_PROBABILITY="${LATENCY_SHED_PROBABILITY:-0.15}"
+      export MAX_PROCESS_CPU_PERCENT="${MAX_PROCESS_CPU_PERCENT:-220}"
+      export CPU_SHED_PROBABILITY="${CPU_SHED_PROBABILITY:-0.05}"
+      export MAX_SHED_PROBABILITY="${MAX_SHED_PROBABILITY:-0.65}"
       ;;
     5)
       export IN_FLIGHT_SOFT_LIMIT="${IN_FLIGHT_SOFT_LIMIT:-30}"
@@ -188,7 +188,7 @@ echo "Frontend:   ${APP_URL}/"
 echo "API:        ${APP_URL}/api/..."
 echo "Health:     curl ${APP_URL}/health"
 echo "Metrics:    curl ${APP_URL}/metrics"
-echo "Run load test: k6 run -e BASE_URL=${APP_URL} -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=gcp${BACKEND_NODE_COUNT}_${MACHINE_TYPE}_${IMAGE_TAG} scripts/load_test.js"
+echo "Run load test: k6 run -e BASE_URL=${APP_URL} -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=100 -e RUN_ID=gcp${BACKEND_NODE_COUNT}_${MACHINE_TYPE}_${IMAGE_TAG} scripts/load_test.js"
 if [[ -n "$PROMETHEUS_URL" && "$PROMETHEUS_URL" != "null" ]]; then
   echo "Prometheus: ${PROMETHEUS_URL}"
 fi
