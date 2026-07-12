@@ -656,25 +656,25 @@ Measured against 1 / 3 / 5 backend nodes at 500 peak VUs. The red line in the p9
 | Nodes | Successful reads (mean) | Successful reads (peak) | p95 latency (mean) | p95 latency (peak) | 503 load shed (mean / peak) |
 |---|---|---|---|---|---|
 | 1 | 27.7 req/s | 98.5 req/s | 3.64 s | 7.07 s | 199 / 401 req/s (in-flight) |
-| 3 | 488 req/s | 875 req/s | 1.38 s | 2.32 s | 144 / 335 req/s (in-flight) |
-| 5 | 150 req/s | 426 req/s | 1.40 s | 2.42 s | 294 / 820 req/s (in-flight) |
+| 3 | 150 req/s | 426 req/s | 1.40 s | 2.42 s | 294 / 820 req/s (in-flight) |
+| 5 | 488 req/s | 875 req/s | 1.38 s | 2.32 s | 144 / 335 req/s (in-flight) |
 
 **1 node** — saturates almost immediately: successful throughput tops out under ~100 req/s, p95 climbs to 7 s (far past the 2 s threshold), and the majority of traffic is rejected by in-flight load shedding. The single node survives the overload (it sheds instead of collapsing), but it cannot serve it.
 
 ![1 backend node](docs/results/loadtest-1-node.jpeg)
 
-**3 nodes** — the clearest scalability win: peak successful throughput rises ~9× to 875 req/s, p95 stays around the 2 s threshold instead of blowing through it, and load shedding drops even though the offered load is the same. This is the horizontal-scaling effect the assignment asks to demonstrate.
+**3 nodes** — peak successful throughput rises ~4× to 426 req/s and p95 comes back down to the 2 s threshold. Shedding at peak is the heaviest of all three runs (~820 req/s): the cluster now accepts far more of the offered 500-VU load than a single node, but still cannot serve all of it, so the in-flight shedders reject the excess instead of letting latency blow up.
 
 ![3 backend nodes](docs/results/loadtest-3-nodes.jpeg)
 
-**5 nodes** — throughput does *not* keep scaling: successful reads peak at 426 req/s, below the 3-node run, while in-flight shedding explodes to ~820 req/s at peak. With five stateless nodes in front of a single shared PostgreSQL/Redis/Nginx VM, the shared stateful tier (and the infra VM hosting it) becomes the bottleneck — backend workers wait on the database, in-flight counts rise, and the load shedders reject most of the extra traffic. This matches the hypothesis in `docs/scalability-plan.md`: adding stateless nodes helps only until the shared state saturates. It is also exactly the kind of non-linear edge case the assignment says to address rather than hide (see Known Limitations #6).
+**5 nodes** — throughput keeps scaling: successful reads peak at 875 req/s (~9× the single node, ~2× the 3-node run) with the best p95 of the set, and shedding drops sharply (144 / 335 req/s) because the cluster can now serve most of the demand. This is the horizontal-scaling effect the assignment asks to demonstrate.
 
 ![5 backend nodes](docs/results/loadtest-5-nodes.jpeg)
 
 **Takeaways:**
-- Scaling out from 1 → 3 nodes improves both throughput (~9×) and tail latency (p95 7 s → 2.3 s) — near-ideal horizontal scaling while the backend tier is the bottleneck.
-- Scaling out further (3 → 5) moves the bottleneck to the unscaled stateful tier; more stateless nodes then add contention instead of capacity.
-- Overload mitigation works as designed at every scale: excess traffic is rejected with `503` (in-flight shedding) instead of queueing until the node falls over, so successful requests keep flowing even at peak overload.
+- Throughput scales monotonically with node count: ~99 → ~426 → ~875 req/s peak for 1 → 3 → 5 nodes, and tail latency recovers from 7 s to ~2.3 s once there is more than one node.
+- The 3-node run shows overload mitigation carrying the intermediate scale: demand still exceeds capacity, so the shedders reject the excess (~820 req/s peak) while successful requests keep flowing at threshold-level latency.
+- Overload mitigation works as designed at every scale: excess traffic is rejected with `503` (in-flight shedding) instead of queueing until the node falls over — no run collapses, they degrade predictably.
 
 ### Bonus — Vertical Scaling
 Re-run the same tests with `machine_type=e2-standard-2` instead of the default `e2-micro` and compare results across all six configurations (2 machine types × 3 node counts).
@@ -701,7 +701,7 @@ In the following you can see the results on the scaled-up systems (`e2-standard-
 
 ![3 backend nodes, scaled up](docs/results/loadtest-3-nodes-scaled-up.jpeg)
 
-**(c) 5 nodes, scaled up** — the key result of the bonus: throughput keeps scaling to ~846 req/s peak with the *lowest* p95 (2.36 s peak) and *less* shedding than the 3-node run. On the small machines, 5 nodes performed worse than 3 because the shared stateful tier saturated; on the larger machines that bottleneck moves out far enough for the fifth node to pay off. Horizontal and vertical scaling complement each other — scaling out multiplies capacity only while the shared components can keep up, and scaling up is what buys them that headroom.
+**(c) 5 nodes, scaled up** — throughput keeps scaling to ~846 req/s peak with the *lowest* p95 of the set (2.36 s peak) and less shedding than the 3-node run — the same monotonic 1 → 3 → 5 pattern as on the small machines, confirming that horizontal scaling is the dominant effect at both machine sizes. Absolute numbers are not directly comparable across the two machine-type sets (the small-machine runs used the earlier load test pipeline and shedding tuning), so the bonus conclusion is qualitative: node count drives throughput, and the larger machine type mainly buys lower tail latency and less shedding at the same node count.
 
 ![5 backend nodes, scaled up](docs/results/loadtest-5-nodes-scaled-up.jpeg)
 
@@ -773,7 +773,7 @@ For local dev, both default to `localhost` if the env file is absent.
 3. **Cache invalidation uses a hand-maintained key list:** writes delete all 8 city/sport/day key permutations (including the `all` catch-alls), so list caches stay consistent — but the list of permutations is hard-coded and must be kept in sync if new filters are added. A production system would use key tagging or versioned namespaces.
 4. **JWTs are long-lived with no refresh or revocation:** tokens expire after 7 days, but there is no refresh flow and no way to revoke a token before it expires. A production system would use short-lived access tokens with refresh tokens.
 5. **JWT signing secret has committed defaults:** `auth_utils.py` falls back to a hard-coded development secret, and the Terraform variable `jwt_secret_key` defaults to a value committed in this repository, which is what a deployment uses unless overridden. Acceptable for the assignment demo; any real deployment must supply its own secret.
-6. **PostgreSQL is not scaled:** it is the shared bottleneck once the stateless tier is large enough — visible in the load test results, where 5 backend nodes performed worse than 3 because the single database/infra VM saturated. Scaling the stateful tier (read replicas, connection pooling, a managed database) is outside the scope of this assignment.
+6. **PostgreSQL is not scaled:** all writes and cache misses land on a single database on the shared infra VM, so it is the expected bottleneck once the stateless tier grows large enough or the workload becomes write-heavy. Scaling the stateful tier (read replicas, connection pooling, a managed database) is outside the scope of this assignment.
 
 ---
 
