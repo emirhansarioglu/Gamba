@@ -82,12 +82,25 @@ class LoadSheddingMiddleware(BaseHTTPMiddleware):
     def _cap_shed_probability(probability):
         return min(MAX_SHED_PROBABILITY, max(0.0, probability))
 
+    @staticmethod
+    def _shed_response(reason):
+        metrics.load_shed.labels(reason).inc()
+        return JSONResponse(
+            {"detail": "Service overloaded", "reason": reason},
+            status_code=503,
+            headers={"Retry-After": "1"},
+        )
+
     async def dispatch(self, request: Request, call_next):
         if not LOAD_SHEDDING_ENABLED or request.url.path in BYPASS_PATHS:
             return await call_next(request)
 
         with self._lock:
             self._refresh_cpu_sample()
+
+            if self._in_flight >= IN_FLIGHT_HARD_LIMIT:
+                return self._shed_response("in_flight")
+
             in_flight_pressure = self._pressure_between(
                 self._in_flight,
                 IN_FLIGHT_SOFT_LIMIT,
@@ -121,12 +134,7 @@ class LoadSheddingMiddleware(BaseHTTPMiddleware):
             shed_probability = self._cap_shed_probability(shed_probability)
 
             if shed_probability > 0 and random.random() < shed_probability:
-                metrics.load_shed.labels(shed_reason).inc()
-                return JSONResponse(
-                    {"detail": "Service overloaded", "reason": shed_reason},
-                    status_code=503,
-                    headers={"Retry-After": "1"},
-                )
+                return self._shed_response(shed_reason)
 
             self._in_flight += 1
             metrics.in_flight_requests.set(self._in_flight)
