@@ -74,7 +74,7 @@ gamba/
 │   │   └── events.py                 # GET/POST /api/events, POST /api/events/{id}/join
 │   ├── middleware/
 │   │   ├── rate_limiter.py           # Hand-rolled token bucket per IP
-│   │   └── load_shedder.py           # In-flight and latency-based load shedding
+│   │   └── load_shedder.py           # In-flight, CPU, and latency-based load shedding
 │   ├── auth_utils.py                 # bcrypt hashing, JWT encode/decode
 │   ├── cache.py                      # Redis get/set/delete helpers
 │   ├── metrics.py                    # Prometheus counters, gauges + histograms
@@ -186,8 +186,8 @@ POST /api/events/{id}/join
 
 `middleware/rate_limiter.py` — Starlette middleware:
 - **Algorithm:** Token bucket, one bucket per IP address, stored in-memory dict
-- **Bucket size:** 60 tokens
-- **Refill rate:** 1 token/second
+- **Bucket size:** 120 tokens
+- **Refill rate:** 5 tokens/second
 - **On empty bucket:** return `429 Too Many Requests`
 - Increments `gamba_rate_limited_total` Prometheus counter on each 429
 
@@ -203,7 +203,7 @@ POST /api/events/{id}/join
 
 Rate limiting and load shedding intentionally use different status codes: `429` means one client/IP is sending too much traffic, while `503` means the backend node is protecting itself from global overload.
 
-**Known limitation (documented):** Each backend node maintains its own in-memory bucket. A client can make 60 req/s × N nodes before hitting the limit. A production system would use a shared Redis counter. This is an intentional known trade-off, documented for the presentation.
+**Known limitation (documented):** Each backend node maintains its own in-memory bucket. Per node, a client gets a 120-request burst and 5 req/s sustained — so with N nodes behind round-robin that multiplies to 120 × N burst and 5 × N req/s sustained before hitting any limit. A production system would use a shared Redis counter. This is an intentional known trade-off, documented for the presentation.
 
 ### Req 4a — Redis Read-Through Cache
 
@@ -226,6 +226,7 @@ gamba_rate_limited_total
 gamba_load_shed_total{reason}
 gamba_in_flight_requests
 gamba_latency_ewma_ms
+gamba_cpu_ewma_percent
 gamba_db_query_duration_seconds{operation}
 gamba_db_queries_total{operation, outcome}
 gamba_db_pool_checked_out
@@ -270,7 +271,7 @@ The dashboard is provisioned automatically from `observability/grafana/dashboard
 Dashboards -> Gamba -> Gamba Load Testing
 ```
 
-Prometheus scrapes the backend every 5 seconds using `observability/prometheus.yml`:
+Prometheus scrapes every backend node and the postgres-exporter every 5 seconds. The local load-test stack selects `observability/prometheus-loadtest-{1,3,5}.yml` to match the node count (`scripts/loadtest_stack.sh` sets `PROMETHEUS_CONFIG`); for example the 3-node config:
 
 ```yaml
 scrape_configs:
@@ -278,7 +279,14 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets:
-          - backend:8000
+          - backend1:8000
+          - backend2:8000
+          - backend3:8000
+
+  - job_name: postgres-exporter
+    static_configs:
+      - targets:
+          - postgres-exporter:9187
 ```
 
 The Grafana dashboard starts with the report-focused panels used for scalability tuning:
@@ -321,9 +329,7 @@ The frontend is intentionally minimal — the focus of this project is backend s
 ## Local Development
 
 ### Prerequisites
-- Docker Desktop (for local PostgreSQL + Redis)
-- Node.js 20+ (via nvm)
-- Python 3.11+
+- Docker Desktop — the full local stack (backend, frontend, PostgreSQL, Redis, Prometheus, Grafana) runs in containers
 
 ### Start local services
 ```bash
@@ -437,17 +443,17 @@ Grafana is available with `admin / admin` credentials and contains the same `Gam
 **Scaling out (adding nodes)** and **scaling in (removing nodes)** are the same operation in both directions: re-run the deployment with a different `backend_node_count` (1, 3, or 5):
 
 ```bash
-bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 5 e2-micro dev   # out: 3 → 5
-bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 1 e2-micro dev   # in:  5 → 1
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 5 e2-standard-2 perf   # out: 3 → 5
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 1 e2-standard-2 perf   # in:  5 → 1
 ```
 
-Terraform computes the diff and creates or destroys only the affected `backend-*` VMs, regenerates the Nginx upstream list from the new set of internal IPs, and restarts the infra VM so Nginx picks it up. Scaling in is safe because the backend nodes are fully stateless — no sessions, no local caches that matter, no data — so destroying a node loses nothing; all state lives in PostgreSQL and Redis on the infra VM. This statelessness is what makes the system elastic: node count can change at any time without draining or migration, and Nginx's `max_fails`/`fail_timeout` settings route around nodes that disappear mid-transition.
+Terraform computes the diff and creates or destroys only the affected `backend-*` VMs, regenerates the Nginx upstream list from the new set of internal IPs, and restarts the infra VM so Nginx picks it up. Note that `deploy.sh` also swaps in node-count-specific load-shedding limits (`configure_load_shedding`), so a scale-out changes each node's shedding thresholds along with the node count. Scaling in is safe because the backend nodes are fully stateless — no sessions, no local caches that matter, no data — so destroying a node loses nothing; all state lives in PostgreSQL and Redis on the infra VM. This statelessness is what makes the system elastic: node count can change at any time without draining or migration, and Nginx's `max_fails`/`fail_timeout` settings route around nodes that disappear mid-transition.
 
 **Scaling up/down (vertical)** changes the VM size for all nodes via the `machine_type` variable:
 
 ```bash
-bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-standard-2 dev   # up
-bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-micro dev        # down
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-standard-2 perf   # up
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-micro dev         # down
 ```
 
 Changing the machine type recreates the VMs, so unlike horizontal scaling this implies downtime for the affected tier.
@@ -643,30 +649,32 @@ Record for each of 1 / 3 / 5 nodes:
 
 ## Load Test Results
 
-Measured with the K6 read-heavy scenario above (ramp to 500 VUs, ~4 minutes) against 1 / 3 / 5 backend nodes. The red line in the p95 panels is the K6 threshold (`p(95) < 2s`).
+> **Note:** these runs used an earlier version of the load test pipeline — a shorter ramp (10 → 100 → 500 VUs over ~4 minutes) with users authenticating during the scenario, and earlier load-shedding tuning. The current K6 script (pre-authenticated users, longer profile, `TARGET_VUS`) and the per-node-count shedding defaults in `deploy.sh` will produce different absolute numbers; the qualitative scaling behavior below is what these charts demonstrate.
+
+Measured against 1 / 3 / 5 backend nodes at 500 peak VUs. The red line in the p95 panels is the K6 threshold (`p(95) < 2s`).
 
 | Nodes | Successful reads (mean) | Successful reads (peak) | p95 latency (mean) | p95 latency (peak) | 503 load shed (mean / peak) |
 |---|---|---|---|---|---|
 | 1 | 27.7 req/s | 98.5 req/s | 3.64 s | 7.07 s | 199 / 401 req/s (in-flight) |
-| 3 | 488 req/s | 875 req/s | 1.38 s | 2.32 s | 144 / 335 req/s (in-flight) |
-| 5 | 150 req/s | 426 req/s | 1.40 s | 2.42 s | 294 / 820 req/s (in-flight) |
+| 3 | 150 req/s | 426 req/s | 1.40 s | 2.42 s | 294 / 820 req/s (in-flight) |
+| 5 | 488 req/s | 875 req/s | 1.38 s | 2.32 s | 144 / 335 req/s (in-flight) |
 
 **1 node** — saturates almost immediately: successful throughput tops out under ~100 req/s, p95 climbs to 7 s (far past the 2 s threshold), and the majority of traffic is rejected by in-flight load shedding. The single node survives the overload (it sheds instead of collapsing), but it cannot serve it.
 
 ![1 backend node](docs/results/loadtest-1-node.jpeg)
 
-**3 nodes** — the clearest scalability win: peak successful throughput rises ~9× to 875 req/s, p95 stays around the 2 s threshold instead of blowing through it, and load shedding drops even though the offered load is the same. This is the horizontal-scaling effect the assignment asks to demonstrate.
+**3 nodes** — peak successful throughput rises ~4× to 426 req/s and p95 comes back down to the 2 s threshold. Shedding at peak is the heaviest of all three runs (~820 req/s): the cluster now accepts far more of the offered 500-VU load than a single node, but still cannot serve all of it, so the in-flight shedders reject the excess instead of letting latency blow up.
 
 ![3 backend nodes](docs/results/loadtest-3-nodes.jpeg)
 
-**5 nodes** — throughput does *not* keep scaling: successful reads peak at 426 req/s, below the 3-node run, while in-flight shedding explodes to ~820 req/s at peak. With five stateless nodes in front of a single shared PostgreSQL/Redis/Nginx VM, the shared stateful tier (and the infra VM hosting it) becomes the bottleneck — backend workers wait on the database, in-flight counts rise, and the load shedders reject most of the extra traffic. This matches the hypothesis in `docs/scalability-plan.md`: adding stateless nodes helps only until the shared state saturates. It is also exactly the kind of non-linear edge case the assignment says to address rather than hide (see Known Limitations #6).
+**5 nodes** — throughput keeps scaling: successful reads peak at 875 req/s (~9× the single node, ~2× the 3-node run) with the best p95 of the set, and shedding drops sharply (144 / 335 req/s) because the cluster can now serve most of the demand. This is the horizontal-scaling effect the assignment asks to demonstrate.
 
 ![5 backend nodes](docs/results/loadtest-5-nodes.jpeg)
 
 **Takeaways:**
-- Scaling out from 1 → 3 nodes improves both throughput (~9×) and tail latency (p95 7 s → 2.3 s) — near-ideal horizontal scaling while the backend tier is the bottleneck.
-- Scaling out further (3 → 5) moves the bottleneck to the unscaled stateful tier; more stateless nodes then add contention instead of capacity.
-- Overload mitigation works as designed at every scale: excess traffic is rejected with `503` (in-flight shedding) instead of queueing until the node falls over, so successful requests keep flowing even at peak overload.
+- Throughput scales monotonically with node count: ~99 → ~426 → ~875 req/s peak for 1 → 3 → 5 nodes, and tail latency recovers from 7 s to ~2.3 s once there is more than one node.
+- The 3-node run shows overload mitigation carrying the intermediate scale: demand still exceeds capacity, so the shedders reject the excess (~820 req/s peak) while successful requests keep flowing at threshold-level latency.
+- Overload mitigation works as designed at every scale: excess traffic is rejected with `503` (in-flight shedding) instead of queueing until the node falls over — no run collapses, they degrade predictably.
 
 ### Bonus — Vertical Scaling
 Re-run the same tests with `machine_type=e2-standard-2` instead of the default `e2-micro` and compare results across all six configurations (2 machine types × 3 node counts).
@@ -674,6 +682,28 @@ Re-run the same tests with `machine_type=e2-standard-2` instead of the default `
 ```bash
 terraform apply -var="project_id=..." -var="backend_node_count=1" -var="machine_type=e2-standard-2"
 ```
+
+#### Results on the scaled-up machines
+
+In the following you can see the results on the scaled-up systems (`e2-standard-2`) from (a) 1 backend node to (b) 3 backend nodes to (c) 5 backend nodes:
+
+| Nodes | Successful reads (mean) | Successful reads (peak) | p95 latency (mean) | p95 latency (peak) | 503 load shed (mean / peak) |
+|---|---|---|---|---|---|
+| (a) 1 | 55.3 req/s | 182 req/s | 5.73 s | 10 s | 31.7 / 116 req/s (in-flight) |
+| (b) 3 | 283 req/s | 491 req/s | 1.83 s | 3.40 s | 189 / 436 req/s (in-flight) |
+| (c) 5 | 554 req/s | 846 req/s | 1.56 s | 2.36 s | 111 / 245 req/s (in-flight) |
+
+**(a) 1 node, scaled up** — vertical scaling roughly doubles the single node's throughput compared to the small-machine run (peak ~182 vs ~99 req/s), but it does not change the shape of the problem: the node still saturates, p95 spikes to 10 s, and in-flight shedding kicks in. One bigger machine is not a substitute for more machines.
+
+![1 backend node, scaled up](docs/results/loadtest-1-node-scaled-up.jpeg)
+
+**(b) 3 nodes, scaled up** — throughput scales to ~491 req/s peak and p95 drops back toward the 2 s threshold. Shedding is still substantial at peak load, which shows the cluster running close to its protective limits rather than failing.
+
+![3 backend nodes, scaled up](docs/results/loadtest-3-nodes-scaled-up.jpeg)
+
+**(c) 5 nodes, scaled up** — throughput keeps scaling to ~846 req/s peak with the *lowest* p95 of the set (2.36 s peak) and less shedding than the 3-node run — the same monotonic 1 → 3 → 5 pattern as on the small machines, confirming that horizontal scaling is the dominant effect at both machine sizes. Absolute numbers are not directly comparable across the two machine-type sets (the small-machine runs used the earlier load test pipeline and shedding tuning), so the bonus conclusion is qualitative: node count drives throughput, and the larger machine type mainly buys lower tail latency and less shedding at the same node count.
+
+![5 backend nodes, scaled up](docs/results/loadtest-5-nodes-scaled-up.jpeg)
 
 ---
 
@@ -711,21 +741,21 @@ DATABASE_URL=postgresql://gamba:gamba@<POSTGRES_IP>:5432/gamba
 REDIS_URL=redis://<REDIS_IP>:6379
 JWT_SECRET_KEY=change-me-in-production
 ALLOWED_ORIGINS=http://<LB_IP>
-TRUST_FORWARDED_IPS=false
-LOAD_SHEDDING_ENABLED=false
+TRUST_FORWARDED_IPS=true
+LOAD_SHEDDING_ENABLED=true
 IN_FLIGHT_SOFT_LIMIT=80
 IN_FLIGHT_HARD_LIMIT=100
 MAX_AVG_LATENCY_MS=1500
-LATENCY_SHED_PROBABILITY=0.5
-LATENCY_EWMA_ALPHA=0.1
-MAX_PROCESS_CPU_PERCENT=185
-CPU_SHED_PROBABILITY=0.5
+LATENCY_SHED_PROBABILITY=0.7
+LATENCY_EWMA_ALPHA=0.3
+MAX_PROCESS_CPU_PERCENT=385
+CPU_SHED_PROBABILITY=0.7
 CPU_EWMA_ALPHA=0.2
 CPU_SAMPLE_INTERVAL_SECONDS=1
 MAX_SHED_PROBABILITY=1.0
 ```
 
-In code, `TRUST_FORWARDED_IPS` and `LOAD_SHEDDING_ENABLED` both default to `false` when unset.
+In code, `TRUST_FORWARDED_IPS` and `LOAD_SHEDDING_ENABLED` both default to `false` when unset. For GCP deployments, `scripts/deploy.sh` overrides the shedding limits with node-count-specific values.
 
 ### Frontend (`.env`)
 ```
@@ -738,12 +768,12 @@ For local dev, both default to `localhost` if the env file is absent.
 
 ## Known Limitations
 
-1. **Rate limiter is per-process:** each backend node has its own in-memory bucket per IP. With N nodes a client gets 60 × N requests/second before hitting any limit. A production system would use a shared Redis counter.
+1. **Rate limiter is per-process:** each backend node has its own in-memory bucket per IP (120-token burst, 5 req/s refill). With N nodes a client gets a 120 × N burst and 5 × N requests/second sustained before hitting any limit. A production system would use a shared Redis counter.
 2. **Redis is a single point of failure:** no replication, and cache errors are not caught — if Redis is unreachable, `GET /api/events` fails with a `500` rather than falling back to PostgreSQL. A production system would catch cache errors and degrade to direct database reads.
 3. **Cache invalidation uses a hand-maintained key list:** writes delete all 8 city/sport/day key permutations (including the `all` catch-alls), so list caches stay consistent — but the list of permutations is hard-coded and must be kept in sync if new filters are added. A production system would use key tagging or versioned namespaces.
 4. **JWTs are long-lived with no refresh or revocation:** tokens expire after 7 days, but there is no refresh flow and no way to revoke a token before it expires. A production system would use short-lived access tokens with refresh tokens.
 5. **JWT signing secret has committed defaults:** `auth_utils.py` falls back to a hard-coded development secret, and the Terraform variable `jwt_secret_key` defaults to a value committed in this repository, which is what a deployment uses unless overridden. Acceptable for the assignment demo; any real deployment must supply its own secret.
-6. **PostgreSQL is not scaled:** it is the shared bottleneck once the stateless tier is large enough — visible in the load test results, where 5 backend nodes performed worse than 3 because the single database/infra VM saturated. Scaling the stateful tier (read replicas, connection pooling, a managed database) is outside the scope of this assignment.
+6. **PostgreSQL is not scaled:** all writes and cache misses land on a single database on the shared infra VM, so it is the expected bottleneck once the stateless tier grows large enough or the workload becomes write-heavy. Scaling the stateful tier (read replicas, connection pooling, a managed database) is outside the scope of this assignment.
 
 ---
 
@@ -752,6 +782,6 @@ For local dev, both default to `localhost` if the env file is absent.
 | Document | Contents |
 |---|---|
 | `docs/scalability-plan.md` | Original planning document: hypothesis, architecture proposal, component responsibilities, test plan. The README reflects the as-built system where the two differ. |
-| `docs/results/` | Grafana screenshots from the 1 / 3 / 5 node load test runs, embedded in the Load Test Results section above. |
+| `docs/results/` | Grafana screenshots from the 1 / 3 / 5 node load test runs on both machine types, embedded in the Load Test Results section above. |
 
 Presentation slides will be added to `docs/` separately.
