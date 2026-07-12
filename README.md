@@ -74,7 +74,7 @@ gamba/
 │   │   └── events.py                 # GET/POST /api/events, POST /api/events/{id}/join
 │   ├── middleware/
 │   │   ├── rate_limiter.py           # Hand-rolled token bucket per IP
-│   │   └── load_shedder.py           # In-flight and latency-based load shedding
+│   │   └── load_shedder.py           # In-flight, CPU, and latency-based load shedding
 │   ├── auth_utils.py                 # bcrypt hashing, JWT encode/decode
 │   ├── cache.py                      # Redis get/set/delete helpers
 │   ├── metrics.py                    # Prometheus counters, gauges + histograms
@@ -186,8 +186,8 @@ POST /api/events/{id}/join
 
 `middleware/rate_limiter.py` — Starlette middleware:
 - **Algorithm:** Token bucket, one bucket per IP address, stored in-memory dict
-- **Bucket size:** 60 tokens
-- **Refill rate:** 1 token/second
+- **Bucket size:** 120 tokens
+- **Refill rate:** 5 tokens/second
 - **On empty bucket:** return `429 Too Many Requests`
 - Increments `gamba_rate_limited_total` Prometheus counter on each 429
 
@@ -203,7 +203,7 @@ POST /api/events/{id}/join
 
 Rate limiting and load shedding intentionally use different status codes: `429` means one client/IP is sending too much traffic, while `503` means the backend node is protecting itself from global overload.
 
-**Known limitation (documented):** Each backend node maintains its own in-memory bucket. A client can make 60 req/s × N nodes before hitting the limit. A production system would use a shared Redis counter. This is an intentional known trade-off, documented for the presentation.
+**Known limitation (documented):** Each backend node maintains its own in-memory bucket. Per node, a client gets a 120-request burst and 5 req/s sustained — so with N nodes behind round-robin that multiplies to 120 × N burst and 5 × N req/s sustained before hitting any limit. A production system would use a shared Redis counter. This is an intentional known trade-off, documented for the presentation.
 
 ### Req 4a — Redis Read-Through Cache
 
@@ -226,6 +226,7 @@ gamba_rate_limited_total
 gamba_load_shed_total{reason}
 gamba_in_flight_requests
 gamba_latency_ewma_ms
+gamba_cpu_ewma_percent
 gamba_db_query_duration_seconds{operation}
 gamba_db_queries_total{operation, outcome}
 gamba_db_pool_checked_out
@@ -270,7 +271,7 @@ The dashboard is provisioned automatically from `observability/grafana/dashboard
 Dashboards -> Gamba -> Gamba Load Testing
 ```
 
-Prometheus scrapes the backend every 5 seconds using `observability/prometheus.yml`:
+Prometheus scrapes every backend node and the postgres-exporter every 5 seconds. The local load-test stack selects `observability/prometheus-loadtest-{1,3,5}.yml` to match the node count (`scripts/loadtest_stack.sh` sets `PROMETHEUS_CONFIG`); for example the 3-node config:
 
 ```yaml
 scrape_configs:
@@ -278,7 +279,14 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets:
-          - backend:8000
+          - backend1:8000
+          - backend2:8000
+          - backend3:8000
+
+  - job_name: postgres-exporter
+    static_configs:
+      - targets:
+          - postgres-exporter:9187
 ```
 
 The Grafana dashboard starts with the report-focused panels used for scalability tuning:
@@ -321,9 +329,7 @@ The frontend is intentionally minimal — the focus of this project is backend s
 ## Local Development
 
 ### Prerequisites
-- Docker Desktop (for local PostgreSQL + Redis)
-- Node.js 20+ (via nvm)
-- Python 3.11+
+- Docker Desktop — the full local stack (backend, frontend, PostgreSQL, Redis, Prometheus, Grafana) runs in containers
 
 ### Start local services
 ```bash
@@ -437,17 +443,17 @@ Grafana is available with `admin / admin` credentials and contains the same `Gam
 **Scaling out (adding nodes)** and **scaling in (removing nodes)** are the same operation in both directions: re-run the deployment with a different `backend_node_count` (1, 3, or 5):
 
 ```bash
-bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 5 e2-micro dev   # out: 3 → 5
-bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 1 e2-micro dev   # in:  5 → 1
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 5 e2-standard-2 perf   # out: 3 → 5
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 1 e2-standard-2 perf   # in:  5 → 1
 ```
 
-Terraform computes the diff and creates or destroys only the affected `backend-*` VMs, regenerates the Nginx upstream list from the new set of internal IPs, and restarts the infra VM so Nginx picks it up. Scaling in is safe because the backend nodes are fully stateless — no sessions, no local caches that matter, no data — so destroying a node loses nothing; all state lives in PostgreSQL and Redis on the infra VM. This statelessness is what makes the system elastic: node count can change at any time without draining or migration, and Nginx's `max_fails`/`fail_timeout` settings route around nodes that disappear mid-transition.
+Terraform computes the diff and creates or destroys only the affected `backend-*` VMs, regenerates the Nginx upstream list from the new set of internal IPs, and restarts the infra VM so Nginx picks it up. Note that `deploy.sh` also swaps in node-count-specific load-shedding limits (`configure_load_shedding`), so a scale-out changes each node's shedding thresholds along with the node count. Scaling in is safe because the backend nodes are fully stateless — no sessions, no local caches that matter, no data — so destroying a node loses nothing; all state lives in PostgreSQL and Redis on the infra VM. This statelessness is what makes the system elastic: node count can change at any time without draining or migration, and Nginx's `max_fails`/`fail_timeout` settings route around nodes that disappear mid-transition.
 
 **Scaling up/down (vertical)** changes the VM size for all nodes via the `machine_type` variable:
 
 ```bash
-bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-standard-2 dev   # up
-bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-micro dev        # down
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-standard-2 perf   # up
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-micro dev         # down
 ```
 
 Changing the machine type recreates the VMs, so unlike horizontal scaling this implies downtime for the affected tier.
@@ -643,7 +649,9 @@ Record for each of 1 / 3 / 5 nodes:
 
 ## Load Test Results
 
-Measured with the K6 read-heavy scenario above (ramp to 500 VUs, ~4 minutes) against 1 / 3 / 5 backend nodes. The red line in the p95 panels is the K6 threshold (`p(95) < 2s`).
+> **Note:** these runs used an earlier version of the load test pipeline — a shorter ramp (10 → 100 → 500 VUs over ~4 minutes) with users authenticating during the scenario, and earlier load-shedding tuning. The current K6 script (pre-authenticated users, longer profile, `TARGET_VUS`) and the per-node-count shedding defaults in `deploy.sh` will produce different absolute numbers; the qualitative scaling behavior below is what these charts demonstrate.
+
+Measured against 1 / 3 / 5 backend nodes at 500 peak VUs. The red line in the p95 panels is the K6 threshold (`p(95) < 2s`).
 
 | Nodes | Successful reads (mean) | Successful reads (peak) | p95 latency (mean) | p95 latency (peak) | 503 load shed (mean / peak) |
 |---|---|---|---|---|---|
@@ -711,21 +719,21 @@ DATABASE_URL=postgresql://gamba:gamba@<POSTGRES_IP>:5432/gamba
 REDIS_URL=redis://<REDIS_IP>:6379
 JWT_SECRET_KEY=change-me-in-production
 ALLOWED_ORIGINS=http://<LB_IP>
-TRUST_FORWARDED_IPS=false
-LOAD_SHEDDING_ENABLED=false
+TRUST_FORWARDED_IPS=true
+LOAD_SHEDDING_ENABLED=true
 IN_FLIGHT_SOFT_LIMIT=80
 IN_FLIGHT_HARD_LIMIT=100
 MAX_AVG_LATENCY_MS=1500
-LATENCY_SHED_PROBABILITY=0.5
-LATENCY_EWMA_ALPHA=0.1
-MAX_PROCESS_CPU_PERCENT=185
-CPU_SHED_PROBABILITY=0.5
+LATENCY_SHED_PROBABILITY=0.7
+LATENCY_EWMA_ALPHA=0.3
+MAX_PROCESS_CPU_PERCENT=385
+CPU_SHED_PROBABILITY=0.7
 CPU_EWMA_ALPHA=0.2
 CPU_SAMPLE_INTERVAL_SECONDS=1
 MAX_SHED_PROBABILITY=1.0
 ```
 
-In code, `TRUST_FORWARDED_IPS` and `LOAD_SHEDDING_ENABLED` both default to `false` when unset.
+In code, `TRUST_FORWARDED_IPS` and `LOAD_SHEDDING_ENABLED` both default to `false` when unset. For GCP deployments, `scripts/deploy.sh` overrides the shedding limits with node-count-specific values.
 
 ### Frontend (`.env`)
 ```
@@ -738,7 +746,7 @@ For local dev, both default to `localhost` if the env file is absent.
 
 ## Known Limitations
 
-1. **Rate limiter is per-process:** each backend node has its own in-memory bucket per IP. With N nodes a client gets 60 × N requests/second before hitting any limit. A production system would use a shared Redis counter.
+1. **Rate limiter is per-process:** each backend node has its own in-memory bucket per IP (120-token burst, 5 req/s refill). With N nodes a client gets a 120 × N burst and 5 × N requests/second sustained before hitting any limit. A production system would use a shared Redis counter.
 2. **Redis is a single point of failure:** no replication, and cache errors are not caught — if Redis is unreachable, `GET /api/events` fails with a `500` rather than falling back to PostgreSQL. A production system would catch cache errors and degrade to direct database reads.
 3. **Cache invalidation uses a hand-maintained key list:** writes delete all 8 city/sport/day key permutations (including the `all` catch-alls), so list caches stay consistent — but the list of permutations is hard-coded and must be kept in sync if new filters are added. A production system would use key tagging or versioned namespaces.
 4. **JWTs are long-lived with no refresh or revocation:** tokens expire after 7 days, but there is no refresh flow and no way to revoke a token before it expires. A production system would use short-lived access tokens with refresh tokens.
