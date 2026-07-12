@@ -76,6 +76,72 @@ variable "enable_observability" {
   default     = true
 }
 
+variable "load_shedding_enabled" {
+  description = "Whether backend request load shedding is enabled."
+  type        = bool
+  default     = true
+}
+
+variable "in_flight_soft_limit" {
+  description = "Per-backend in-flight request count where probabilistic shedding starts."
+  type        = number
+  default     = 80
+}
+
+variable "in_flight_hard_limit" {
+  description = "Per-backend in-flight request count where shedding reaches full pressure before max_shed_probability capping."
+  type        = number
+  default     = 100
+}
+
+variable "max_avg_latency_ms" {
+  description = "Latency EWMA threshold in milliseconds before latency-based shedding starts."
+  type        = number
+  default     = 1500
+}
+
+variable "latency_shed_probability" {
+  description = "Base latency shedding probability when latency EWMA exceeds max_avg_latency_ms."
+  type        = number
+  default     = 0.7
+}
+
+variable "latency_ewma_alpha" {
+  description = "EWMA smoothing factor for observed request latency."
+  type        = number
+  default     = 0.2
+}
+
+variable "max_process_cpu_percent" {
+  description = "Per-backend process CPU EWMA threshold before CPU-based shedding starts. 100 means roughly one full core."
+  type        = number
+  default     = 185
+}
+
+variable "cpu_shed_probability" {
+  description = "Base CPU shedding probability when process CPU EWMA exceeds max_process_cpu_percent."
+  type        = number
+  default     = 0.7
+}
+
+variable "cpu_ewma_alpha" {
+  description = "EWMA smoothing factor for backend process CPU utilization."
+  type        = number
+  default     = 0.2
+}
+
+variable "cpu_sample_interval_seconds" {
+  description = "Minimum seconds between backend process CPU samples."
+  type        = number
+  default     = 1
+}
+
+variable "max_shed_probability" {
+  description = "Maximum probability cap for probabilistic shedding so the backend can still admit some requests under pressure."
+  type        = number
+  default     = 1.0
+}
+
 variable "prometheus_image" {
   description = "Prometheus image pulled by the infra VM."
   type        = string

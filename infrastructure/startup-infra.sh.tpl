@@ -150,17 +150,23 @@ docker cp gamba-frontend-assets:/usr/share/nginx/html/. /mnt/stateful_partition/
 docker rm -f gamba-frontend-assets
 
 cat > /mnt/stateful_partition/gamba/nginx/nginx.conf <<'EOF'
-events {}
+worker_processes auto;
+
+events {
+  worker_connections 4096;
+}
 
 http {
   include       /etc/nginx/mime.types;
   default_type  application/octet-stream;
   sendfile      on;
+  keepalive_timeout 30s;
 
   upstream backend_pool {
 %{ for ip in backend_ips ~}
-    server ${ip}:8000 max_fails=3 fail_timeout=10s;
+    server ${ip}:8000 max_fails=0;
 %{ endfor ~}
+    keepalive 64;
   }
 
   server {
@@ -171,37 +177,62 @@ http {
 
     location /health {
       proxy_pass http://backend_pool;
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
       proxy_set_header Host $host;
       proxy_set_header X-Real-IP $remote_addr;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_connect_timeout 1s;
+      proxy_send_timeout 30s;
+      proxy_read_timeout 30s;
     }
 
     location /metrics {
       proxy_pass http://backend_pool;
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
       proxy_set_header Host $host;
       proxy_set_header X-Real-IP $remote_addr;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_connect_timeout 1s;
+      proxy_send_timeout 30s;
+      proxy_read_timeout 30s;
     }
 
     location /api/ {
       proxy_pass http://backend_pool;
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
       proxy_set_header Host $host;
       proxy_set_header X-Real-IP $remote_addr;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_connect_timeout 1s;
+      proxy_send_timeout 30s;
+      proxy_read_timeout 30s;
     }
 
     location /docs {
       proxy_pass http://backend_pool;
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
       proxy_set_header Host $host;
       proxy_set_header X-Real-IP $remote_addr;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_connect_timeout 1s;
+      proxy_send_timeout 30s;
+      proxy_read_timeout 30s;
     }
 
     location /openapi.json {
       proxy_pass http://backend_pool;
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
       proxy_set_header Host $host;
       proxy_set_header X-Real-IP $remote_addr;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_connect_timeout 1s;
+      proxy_send_timeout 30s;
+      proxy_read_timeout 30s;
     }
 
     location / {

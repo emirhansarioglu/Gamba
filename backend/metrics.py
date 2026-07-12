@@ -28,6 +28,10 @@ latency_ewma_ms = Gauge(
     "gamba_latency_ewma_ms",
     "Exponentially weighted moving average of backend request latency in milliseconds",
 )
+cpu_ewma_percent = Gauge(
+    "gamba_cpu_ewma_percent",
+    "Exponentially weighted moving average of backend process CPU utilization percent",
+)
 
 db_query_duration = Histogram(
     "gamba_db_query_duration_seconds",
