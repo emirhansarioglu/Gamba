@@ -429,6 +429,26 @@ terraform -chdir=infrastructure output -raw grafana_url
 
 Grafana is available with `admin / admin` credentials and contains the same `Gamba Load Testing` dashboard used locally. Prometheus scrapes each backend node directly by internal IP, so 1 / 3 / 5 node test runs can be compared from the dashboard.
 
+### Scaling out/in and up/down
+
+**Scaling out (adding nodes)** and **scaling in (removing nodes)** are the same operation in both directions: re-run the deployment with a different `backend_node_count` (1, 3, or 5):
+
+```bash
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 5 e2-micro dev   # out: 3 → 5
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 1 e2-micro dev   # in:  5 → 1
+```
+
+Terraform computes the diff and creates or destroys only the affected `backend-*` VMs, regenerates the Nginx upstream list from the new set of internal IPs, and restarts the infra VM so Nginx picks it up. Scaling in is safe because the backend nodes are fully stateless — no sessions, no local caches that matter, no data — so destroying a node loses nothing; all state lives in PostgreSQL and Redis on the infra VM. This statelessness is what makes the system elastic: node count can change at any time without draining or migration, and Nginx's `max_fails`/`fail_timeout` settings route around nodes that disappear mid-transition.
+
+**Scaling up/down (vertical)** changes the VM size for all nodes via the `machine_type` variable:
+
+```bash
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-standard-2 dev   # up
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-micro dev        # down
+```
+
+Changing the machine type recreates the VMs, so unlike horizontal scaling this implies downtime for the affected tier.
+
 ### Teardown
 ```bash
 terraform -chdir=infrastructure destroy -var="project_id=YOUR_GCP_PROJECT_ID"
@@ -516,6 +536,35 @@ Record for each of 1 / 3 / 5 nodes:
 - p95 response latency
 - Error rate (429s, 5xx)
 
+---
+
+## Load Test Results
+
+Measured with the K6 read-heavy scenario above (ramp to 500 VUs, ~4 minutes) against 1 / 3 / 5 backend nodes. The red line in the p95 panels is the K6 threshold (`p(95) < 2s`).
+
+| Nodes | Successful reads (mean) | Successful reads (peak) | p95 latency (mean) | p95 latency (peak) | 503 load shed (mean / peak) |
+|---|---|---|---|---|---|
+| 1 | 27.7 req/s | 98.5 req/s | 3.64 s | 7.07 s | 199 / 401 req/s (in-flight) |
+| 3 | 488 req/s | 875 req/s | 1.38 s | 2.32 s | 144 / 335 req/s (in-flight) |
+| 5 | 150 req/s | 426 req/s | 1.40 s | 2.42 s | 294 / 820 req/s (in-flight) |
+
+**1 node** — saturates almost immediately: successful throughput tops out under ~100 req/s, p95 climbs to 7 s (far past the 2 s threshold), and the majority of traffic is rejected by in-flight load shedding. The single node survives the overload (it sheds instead of collapsing), but it cannot serve it.
+
+![1 backend node](docs/results/loadtest-1-node.jpeg)
+
+**3 nodes** — the clearest scalability win: peak successful throughput rises ~9× to 875 req/s, p95 stays around the 2 s threshold instead of blowing through it, and load shedding drops even though the offered load is the same. This is the horizontal-scaling effect the assignment asks to demonstrate.
+
+![3 backend nodes](docs/results/loadtest-3-nodes.jpeg)
+
+**5 nodes** — throughput does *not* keep scaling: successful reads peak at 426 req/s, below the 3-node run, while in-flight shedding explodes to ~820 req/s at peak. With five stateless nodes in front of a single shared PostgreSQL/Redis/Nginx VM, the shared stateful tier (and the infra VM hosting it) becomes the bottleneck — backend workers wait on the database, in-flight counts rise, and the load shedders reject most of the extra traffic. This matches the hypothesis in `docs/scalability-plan.md`: adding stateless nodes helps only until the shared state saturates. It is also exactly the kind of non-linear edge case the assignment says to address rather than hide (see Known Limitations #6).
+
+![5 backend nodes](docs/results/loadtest-5-nodes.jpeg)
+
+**Takeaways:**
+- Scaling out from 1 → 3 nodes improves both throughput (~9×) and tail latency (p95 7 s → 2.3 s) — near-ideal horizontal scaling while the backend tier is the bottleneck.
+- Scaling out further (3 → 5) moves the bottleneck to the unscaled stateful tier; more stateless nodes then add contention instead of capacity.
+- Overload mitigation works as designed at every scale: excess traffic is rejected with `503` (in-flight shedding) instead of queueing until the node falls over, so successful requests keep flowing even at peak overload.
+
 ### Bonus — Vertical Scaling
 Re-run the same tests with `machine_type=e2-standard-2` instead of the default `e2-micro` and compare results across all six configurations (2 machine types × 3 node counts).
 
@@ -585,4 +634,15 @@ For local dev, both default to `localhost` if the env file is absent.
 3. **Cache invalidation uses a hand-maintained key list:** writes delete all 8 city/sport/day key permutations (including the `all` catch-alls), so list caches stay consistent — but the list of permutations is hard-coded and must be kept in sync if new filters are added. A production system would use key tagging or versioned namespaces.
 4. **JWTs are long-lived with no refresh or revocation:** tokens expire after 7 days, but there is no refresh flow and no way to revoke a token before it expires. A production system would use short-lived access tokens with refresh tokens.
 5. **JWT signing secret has committed defaults:** `auth_utils.py` falls back to a hard-coded development secret, and the Terraform variable `jwt_secret_key` defaults to a value committed in this repository, which is what a deployment uses unless overridden. Acceptable for the assignment demo; any real deployment must supply its own secret.
-6. **PostgreSQL is not scaled:** it is the bottleneck at very high write load. Outside the scope of this assignment.
+6. **PostgreSQL is not scaled:** it is the shared bottleneck once the stateless tier is large enough — visible in the load test results, where 5 backend nodes performed worse than 3 because the single database/infra VM saturated. Scaling the stateful tier (read replicas, connection pooling, a managed database) is outside the scope of this assignment.
+
+---
+
+## Further Documentation
+
+| Document | Contents |
+|---|---|
+| `docs/scalability-plan.md` | Original planning document: hypothesis, architecture proposal, component responsibilities, test plan. The README reflects the as-built system where the two differ. |
+| `docs/results/` | Grafana screenshots from the 1 / 3 / 5 node load test runs, embedded in the Load Test Results section above. |
+
+Presentation slides will be added to `docs/` separately.
