@@ -14,6 +14,7 @@ This script:
   1. Creates/enables the GCP APIs and Artifact Registry repository.
   2. Builds backend image & frontend asset image locally with Docker and pushes them to Artifact Registry.
   3. Applies the Compute Engine cluster that pulls nginx, postgres, redis, backend, frontend asset image, Prometheus, and Grafana images.
+  4. Serves the React frontend from the public nginx load balancer and proxies /api, /health, /metrics to the backend pool.
 USAGE
 }
 
@@ -86,11 +87,54 @@ LB_IP="$(terraform -chdir="${TF_DIR}" output -raw lb_ip)"
 PROMETHEUS_URL="$(terraform -chdir="${TF_DIR}" output -raw prometheus_url 2>/dev/null || true)"
 GRAFANA_URL="$(terraform -chdir="${TF_DIR}" output -raw grafana_url 2>/dev/null || true)"
 
+APP_URL="http://${LB_IP}"
+
+echo ""
+echo "==> Smoke checking public load balancer"
+for attempt in {1..30}; do
+  if curl -fsS "${APP_URL}/" >/dev/null && curl -fsS "${APP_URL}/health" >/dev/null; then
+    echo "Frontend and backend health are reachable through nginx."
+    break
+  fi
+
+  if [[ "$attempt" -eq 30 ]]; then
+    echo "Warning: public nginx did not pass smoke checks yet. Startup may still be finishing." >&2
+    break
+  fi
+
+  sleep 5
+done
+
+if [[ -n "$GRAFANA_URL" && "$GRAFANA_URL" != "null" ]]; then
+  echo ""
+  echo "==> Smoke checking Grafana"
+  for attempt in {1..30}; do
+    dashboard_search="$(
+      curl -fsS -u admin:admin "${GRAFANA_URL}/api/search?query=Gamba%20Load%20Testing" 2>/dev/null || true
+    )"
+
+    if curl -fsS "${GRAFANA_URL}/api/health" >/dev/null && [[ "$dashboard_search" == *"Gamba Load Testing"* ]]; then
+      echo "Grafana health and Gamba dashboard are reachable."
+      break
+    fi
+
+    if [[ "$attempt" -eq 30 ]]; then
+      echo "Warning: Grafana did not pass smoke checks yet. Startup may still be finishing." >&2
+      break
+    fi
+
+    sleep 5
+  done
+fi
+
 echo ""
 echo "==> Deployment complete"
-echo "App:        http://${LB_IP}"
-echo "Health:     curl http://${LB_IP}/health"
-echo "Metrics:    curl http://${LB_IP}/metrics"
+echo "App:        ${APP_URL}"
+echo "Frontend:   ${APP_URL}/"
+echo "API:        ${APP_URL}/api/..."
+echo "Health:     curl ${APP_URL}/health"
+echo "Metrics:    curl ${APP_URL}/metrics"
+echo "Run load test: k6 run -e BASE_URL=${APP_URL} -e TARGET_VUS=1000 scripts/load_test.js"
 if [[ -n "$PROMETHEUS_URL" && "$PROMETHEUS_URL" != "null" ]]; then
   echo "Prometheus: ${PROMETHEUS_URL}"
 fi
