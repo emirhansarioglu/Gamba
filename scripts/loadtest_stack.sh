@@ -50,6 +50,10 @@ compose_base() {
   docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
 }
 
+compose_all_profiles() {
+  compose_base --profile nodes5 "$@"
+}
+
 case "$ACTION" in
   up)
     case "$NODE_COUNT" in
@@ -69,7 +73,7 @@ case "$ACTION" in
     echo "==> Nginx config:      observability/${NGINX_CONFIG}"
     echo "==> Prometheus config: observability/${PROMETHEUS_CONFIG}"
     echo "==> Removing previous gamba-loadtest stack, if any"
-    compose_base down --remove-orphans
+    compose_all_profiles down --remove-orphans
 
     echo "==> Building and starting containers"
     if [[ -n "$DETACH" ]]; then
@@ -83,10 +87,10 @@ case "$ACTION" in
     fi
     ;;
   down)
-    compose_base down --remove-orphans
+    compose_all_profiles down --remove-orphans
     ;;
   ps)
-    compose_base ps
+    compose_all_profiles ps
     ;;
   *)
     echo "unknown action: $ACTION" >&2
