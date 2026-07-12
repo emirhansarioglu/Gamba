@@ -6,8 +6,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 import metrics
 
-BUCKET_CAPACITY = 60
-REFILL_RATE = 1.0  # tokens per second
+BUCKET_CAPACITY = 120
+REFILL_RATE = 5.0  # tokens per second
 TRUST_FORWARDED_IPS = os.getenv("TRUST_FORWARDED_IPS", "false").lower() == "true"
 
 

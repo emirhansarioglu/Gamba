@@ -185,10 +185,12 @@ POST /api/events/{id}/join
 ### Load Shedding
 
 `middleware/load_shedder.py` rejects requests with `503 Service Unavailable` when the backend is overloaded:
-- **In-flight limit:** rejects when active requests are at or above `MAX_IN_FLIGHT_REQUESTS`
-- **Latency pressure:** tracks an EWMA latency estimate and probabilistically rejects when it is above `MAX_AVG_LATENCY_MS`
+- **In-flight pressure:** accepts all requests below `IN_FLIGHT_SOFT_LIMIT`, sheds gradually between soft and hard limits, and sheds all requests at `IN_FLIGHT_HARD_LIMIT`
+- **CPU pressure:** tracks backend process CPU EWMA and probabilistically rejects based on how far it is above `MAX_PROCESS_CPU_PERCENT`
+- **Latency pressure:** tracks an EWMA latency estimate and probabilistically rejects based on how far it is above `MAX_AVG_LATENCY_MS`
+- **Shedding cap:** `MAX_SHED_PROBABILITY` can keep a small trickle of requests admitted even under severe pressure
 - **Bypass paths:** `/health` and `/metrics` are always allowed
-- **Metrics:** increments `gamba_load_shed_total{reason="in_flight"}` or `gamba_load_shed_total{reason="latency"}`
+- **Metrics:** increments `gamba_load_shed_total{reason="in_flight"}`, `gamba_load_shed_total{reason="cpu"}`, or `gamba_load_shed_total{reason="latency"}`
 
 Rate limiting and load shedding intentionally use different status codes: `429` means one client/IP is sending too much traffic, while `503` means the backend node is protecting itself from global overload.
 
@@ -265,17 +267,18 @@ scrape_configs:
           - backend:8000
 ```
 
-The Grafana dashboard contains five panels:
+The Grafana dashboard starts with the report-focused panels used for scalability tuning:
 
 | Panel | Query | What it shows |
 |---|---|---|
-| Backend Requests Per Second By Status | `sum by (status) (rate(gamba_requests_total[1m]))` | Throughput split by HTTP status, such as `200`, `429`, or `500` |
-| Backend p95 Latency | `histogram_quantile(0.95, sum by (le, endpoint) (rate(gamba_request_duration_seconds_bucket[1m])))` | 95th percentile backend response time per endpoint |
-| Redis Cache Hit And Miss Rate | `rate(gamba_cache_hits_total[1m])`, `rate(gamba_cache_misses_total[1m])` | Whether reads are served from Redis or PostgreSQL |
-| Rate Limited Requests | `rate(gamba_rate_limited_total[1m])` | Requests rejected by the token bucket middleware |
-| Load Shed Requests | `sum by (reason) (rate(gamba_load_shed_total[1m]))` | Requests rejected by in-flight or latency-based load shedding |
+| Successful Reads (200/sec) | `sum(rate(gamba_requests_total{endpoint="/api/events",status="200"}[1m]))` | Main throughput metric for the report |
+| Successful Read p95 Latency | `histogram_quantile(0.95, sum by (le) (rate(gamba_request_duration_seconds_bucket{endpoint="/api/events",status="200"}[1m])))` | p95 latency of successful event reads only; red threshold at 2 seconds |
+| Backend Requests/sec By Status | `sum by (status) (rate(gamba_requests_total{endpoint!~"/health|/metrics"}[1m]))` | Status-code mix for non-health backend traffic |
+| Load Shed Requests/sec | `sum by (reason) (rate(gamba_load_shed_total[1m]))` | Requests rejected by load shedding, split by reason |
+| In-Flight Requests By Node | `max by (instance) (gamba_in_flight_requests)`, `sum(gamba_in_flight_requests)` | Per-node and cluster in-flight pressure for tuning soft/hard limits |
+| Backend CPU By Node | `100 * rate(process_cpu_seconds_total{job="gamba-backend"}[1m])` | Backend process CPU utilization per node |
 
-For scalability benchmarking, use the requests-per-second and p95 latency panels as the main evidence. For overload mitigation, use the rate-limited requests panel to show traffic rejected with `429 Too Many Requests` and the load-shed metric to show traffic rejected with `503 Service Unavailable`.
+Additional panels below the first rows show Postgres, Redis, rate limiting, memory, locks, and database query behavior. For scalability benchmarking, use successful reads/sec and successful read p95 latency as the main evidence. For overload mitigation, use in-flight requests and load-shed requests to show how traffic is rejected with `503 Service Unavailable`.
 
 ---
 
@@ -356,20 +359,37 @@ npm run dev                   # http://localhost:5173
 - An SSH key pair (default: `~/.ssh/id_rsa` / `~/.ssh/id_rsa.pub`)
 
 ### One-command deployment
-```bash
-# 1 backend node
-bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 1 e2-micro dev
 
-# 3 backend nodes
-bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-micro dev
+The deployment script accepts:
 
-# 5 backend nodes
-bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 5 e2-micro dev
+```text
+scripts/deploy.sh <project_id> [backend_node_count] [machine_type] [image_tag]
 ```
 
-Debugged Eddy's Version:
+Use `backend_node_count` values `1`, `3`, or `5` for the assignment measurements. For final performance runs, prefer a stable machine type such as `e2-standard-2`; `e2-micro` is useful for a cheap smoke test but is too noisy for benchmark graphs.
+
 ```bash
-& "C:\Program Files\Git\bin\bash.exe" scripts/deploy.sh project-9a0a6f54-8a89-47b8-a40 1 e2-micro dev
+# 1 backend node
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 1 e2-standard-2 perf
+
+# 3 backend nodes
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-standard-2 perf
+
+# 5 backend nodes
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 5 e2-standard-2 perf
+```
+
+On Windows PowerShell, run the same script through Git Bash:
+
+```powershell
+# 1 backend node
+& "C:\Program Files\Git\bin\bash.exe" .\scripts\deploy.sh YOUR_GCP_PROJECT_ID 1 e2-standard-2 perf
+
+# 3 backend nodes
+& "C:\Program Files\Git\bin\bash.exe" .\scripts\deploy.sh YOUR_GCP_PROJECT_ID 3 e2-standard-2 perf
+
+# 5 backend nodes
+& "C:\Program Files\Git\bin\bash.exe" .\scripts\deploy.sh YOUR_GCP_PROJECT_ID 5 e2-standard-2 perf
 ```
 
 The script does:
@@ -378,7 +398,16 @@ The script does:
 3. Builds `gamba-backend` and `gamba-frontend-assets` locally with Docker and pushes them to Artifact Registry.
 4. Applies Terraform for the cluster.
 5. Restarts the VMs so startup scripts pull the current images and Nginx gets the current backend list.
-6. Prints the public load-balancer URL.
+6. Smoke checks the public load balancer and Grafana.
+7. Prints the public load-balancer URL and a ready-to-run k6 command.
+
+The deploy script also selects node-count-specific load-shedding defaults in `scripts/deploy.sh`:
+
+```text
+configure_load_shedding()
+```
+
+Those values are passed to Terraform and written into each backend VM's environment. If you want to tune `IN_FLIGHT_SOFT_LIMIT`, `IN_FLIGHT_HARD_LIMIT`, latency, CPU, or `MAX_SHED_PROBABILITY` for GCP, update the matching `1)`, `3)`, or `5)` block in `scripts/deploy.sh`. If you run the local load-test stack, update the same block in `scripts/loadtest_stack.sh`.
 
 Terraform creates:
 - 1 `infra` VM (public IP) — runs Nginx (also handling frontend assets), PostgreSQL and Redis.
@@ -417,7 +446,34 @@ terraform -chdir=infrastructure destroy -var="project_id=YOUR_GCP_PROJECT_ID"
 
 ## Load Testing (K6)
 
-`scripts/load_test.js` runs a read-heavy scenario that ramps 10 → 100 → 500 VUs hitting `GET /api/events?city=Berlin&sport=Football&day=<today>`.
+`scripts/load_test.js` runs a read-heavy scenario hitting `GET /api/events?city=Berlin&sport=Football&day=<today>`.
+
+The default scenario:
+- pre-authenticates test users in `setup()`
+- ramps to 100 VUs over 2 minutes
+- ramps to `TARGET_VUS` over 2 minutes
+- holds `TARGET_VUS` for 2 minutes
+- ramps down to 0 over 1 minute
+
+The setup phase creates or logs in reusable test users before the measured read-heavy phase starts. This avoids measuring a large burst of bcrypt-heavy `POST /api/auth/register` calls during the main benchmark.
+
+Important k6 environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BASE_URL` | `http://localhost:8000` | Public app/load-balancer URL |
+| `TARGET_VUS` | `500` | Maximum VUs during the read-heavy scenario |
+| `AUTH_USERS` | `TARGET_VUS` | Number of users to authenticate in `setup()` |
+| `RUN_ID` | `default` | Namespace for generated usernames, e.g. `loadtest_gcp3_1` |
+| `AUTH_SETUP_BATCH_SIZE` | `25` | Number of users registered/logged in concurrently during setup |
+| `PRE_AUTH_USERS` | `true` | Set to `false` to authenticate during the scenario instead |
+| `SETUP_TIMEOUT` | `20m` | k6 timeout for the setup phase |
+
+During setup, k6 prints a line like:
+
+```text
+Setup completed: authenticated 1000/1000 users in 42.31s with batch size 25
+```
 
 The script sends one synthetic `X-Forwarded-For` IP per K6 virtual user. For local Docker Compose load tests, `docker-compose.dev.yml` enables `TRUST_FORWARDED_IPS=true` so the backend rate limiter uses those synthetic IPs instead of treating all requests as coming from `localhost`.
 
@@ -427,56 +483,129 @@ The script also emits custom failure counters:
 |---|---|
 | `read_rate_limited` | `GET /api/events` returned `429 Too Many Requests` |
 | `read_load_shed_in_flight` | `GET /api/events` returned `503` from the in-flight request limit |
+| `read_load_shed_cpu` | `GET /api/events` returned `503` from CPU-based shedding |
 | `read_load_shed_latency` | `GET /api/events` returned `503` from latency-based shedding |
 | `read_load_shed_unknown` | `GET /api/events` returned `503` without a recognized shedding reason |
 | `read_client_errors` | `GET /api/events` returned another `4xx` status |
 | `read_server_errors` | `GET /api/events` returned a `5xx` status |
 | `read_unexpected_status` | `GET /api/events` returned a non-200 status outside those groups |
+| `auth_request_errors` | Register/login failed at the transport level, e.g. EOF or connection reset |
+| `auth_unexpected_status` | Register/login returned an unexpected HTTP status |
 
-Run against each configuration:
+### Run K6 Against GCP
+
+After each deploy, copy the printed `App:` URL or set `LB_IP` manually.
+
+For comparable 1 / 3 / 5 node measurements, keep the same machine type and use a distinct `RUN_ID` per node count:
+
 ```bash
-# Set target to the LB public IP
-k6 run -e BASE_URL=http://$LB_IP scripts/load_test.js
+# 1 backend node
+k6 run -e BASE_URL=http://$LB_IP -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=gcp1_e2standard2 scripts/load_test.js
+
+# 3 backend nodes
+k6 run -e BASE_URL=http://$LB_IP -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=gcp3_e2standard2 scripts/load_test.js
+
+# 5 backend nodes
+k6 run -e BASE_URL=http://$LB_IP -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=gcp5_e2standard2 scripts/load_test.js
 ```
+
+PowerShell example using the printed deployment URL:
+
+```powershell
+k6 run -e BASE_URL=http://34.179.226.113 -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=gcp3_e2standard2 scripts/load_test.js
+```
+
+Reuse the same `RUN_ID` when repeating the same benchmark. Existing users are logged in first, so setup avoids repeated duplicate-registration `400` responses. Use a new `RUN_ID` only when you intentionally want a fresh user set.
+
+If setup is too slow, increase:
+
+```bash
+-e AUTH_SETUP_BATCH_SIZE=50
+```
+
+If setup starts producing `EOF`, connection resets, or high auth failures, reduce it:
+
+```bash
+-e AUTH_SETUP_BATCH_SIZE=10
+```
+
+### Run K6 Locally
 
 For local testing with the observability dashboard open:
 
 ```bash
 docker compose -f docker-compose.dev.yml up -d --build
-k6 run -e BASE_URL=http://localhost:8000 scripts/load_test.js
+k6 run -e BASE_URL=http://localhost:8000 -e TARGET_VUS=500 -e AUTH_USERS=500 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=local500 scripts/load_test.js
+```
+
+To start a local 1 / 3 / 5 backend load-test stack, choose one:
+
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" .\scripts\loadtest_stack.sh 1 --detach
+& "C:\Program Files\Git\bin\bash.exe" .\scripts\loadtest_stack.sh 3 --detach
+& "C:\Program Files\Git\bin\bash.exe" .\scripts\loadtest_stack.sh 5 --detach
+```
+
+Then target local nginx:
+
+```powershell
+k6 run -e BASE_URL=http://localhost:8000 -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=local3 scripts/load_test.js
 ```
 
 To print a small sample of failed responses during the run, enable debug output:
 
 ```bash
-k6 run -e BASE_URL=http://localhost:8000 -e DEBUG_FAILURES=true scripts/load_test.js
+k6 run -e BASE_URL=http://localhost:8000 -e TARGET_VUS=500 -e AUTH_USERS=500 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=debug500 -e DEBUG_FAILURES=true scripts/load_test.js
 ```
 
 To disable synthetic forwarded IPs and test all traffic as coming from one client IP:
 
 ```bash
-k6 run -e BASE_URL=http://localhost:8000 -e SPOOF_IPS=false scripts/load_test.js
+k6 run -e BASE_URL=http://localhost:8000 -e TARGET_VUS=500 -e AUTH_USERS=500 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=no_spoof500 -e SPOOF_IPS=false scripts/load_test.js
 ```
 
 
-To isolate in-flight load shedding, set a low concurrency limit and a very high latency threshold:
+To isolate in-flight load shedding, set low soft/hard concurrency limits and very high latency/CPU thresholds:
 
 ```yaml
 LOAD_SHEDDING_ENABLED: "true"
-MAX_IN_FLIGHT_REQUESTS: "20"
+IN_FLIGHT_SOFT_LIMIT: "10"
+IN_FLIGHT_HARD_LIMIT: "20"
 MAX_AVG_LATENCY_MS: "999999"
+MAX_PROCESS_CPU_PERCENT: "999999"
 ```
 
-To isolate latency-based load shedding, set a high concurrency limit and a low latency threshold:
+To isolate latency-based load shedding, set high in-flight/CPU limits and a low latency threshold:
 
 ```yaml
 LOAD_SHEDDING_ENABLED: "true"
-MAX_IN_FLIGHT_REQUESTS: "999999"
+IN_FLIGHT_SOFT_LIMIT: "999999"
+IN_FLIGHT_HARD_LIMIT: "999999"
 MAX_AVG_LATENCY_MS: "500"
 LATENCY_SHED_PROBABILITY: "0.5"
 ```
 
-To introduce these changes to online deployment adjust these values in infrastructure/main.tf
+For a gentler load-test profile where in-flight shedding protects first and latency shedding acts as a backstop:
+
+```yaml
+IN_FLIGHT_SOFT_LIMIT: "40"
+IN_FLIGHT_HARD_LIMIT: "100"
+MAX_AVG_LATENCY_MS: "5000"
+LATENCY_SHED_PROBABILITY: "0.2"
+```
+
+To isolate CPU-based load shedding, set high in-flight and latency thresholds, then lower the CPU threshold:
+
+```yaml
+LOAD_SHEDDING_ENABLED: "true"
+IN_FLIGHT_SOFT_LIMIT: "999999"
+IN_FLIGHT_HARD_LIMIT: "999999"
+MAX_AVG_LATENCY_MS: "999999"
+MAX_PROCESS_CPU_PERCENT: "60"
+CPU_SHED_PROBABILITY: "0.7"
+```
+
+To introduce these changes to the GCP deployment, adjust the matching node-count block in `scripts/deploy.sh`. For local load-test stacks, adjust the matching block in `scripts/loadtest_stack.sh`. The Terraform variables in `infrastructure/variables.tf` are fallback values for direct Terraform runs; `deploy.sh` passes its selected values explicitly.
 
 Then watch:
 
@@ -504,7 +633,7 @@ terraform apply -var="project_id=..." -var="backend_node_count=1" -var="machine_
 |---|---|---|
 | `project_id` | _(required)_ | GCP project ID |
 | `backend_node_count` | `1` | Number of backend VMs (1, 3, or 5) |
-| `machine_type` | `e2-medium` | GCP machine type for all VMs |
+| `machine_type` | `e2-micro` | GCP machine type for all VMs; use `e2-standard-2` for final performance runs |
 | `region` | `europe-west3` | GCP region (Frankfurt) |
 | `ssh_public_key_path` | `~/.ssh/id_rsa.pub` | SSH key for VM access |
 | `enable_observability` | `true` | Run Prometheus and Grafana on the infra VM |
@@ -522,10 +651,16 @@ JWT_SECRET_KEY=change-me-in-production
 ALLOWED_ORIGINS=http://<LB_IP>
 TRUST_FORWARDED_IPS=false
 LOAD_SHEDDING_ENABLED=false
-MAX_IN_FLIGHT_REQUESTS=100
+IN_FLIGHT_SOFT_LIMIT=80
+IN_FLIGHT_HARD_LIMIT=100
 MAX_AVG_LATENCY_MS=1500
 LATENCY_SHED_PROBABILITY=0.5
 LATENCY_EWMA_ALPHA=0.1
+MAX_PROCESS_CPU_PERCENT=185
+CPU_SHED_PROBABILITY=0.5
+CPU_EWMA_ALPHA=0.2
+CPU_SAMPLE_INTERVAL_SECONDS=1
+MAX_SHED_PROBABILITY=1.0
 ```
 
 ### Frontend (`.env`)

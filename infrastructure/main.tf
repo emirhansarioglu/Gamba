@@ -158,18 +158,24 @@ resource "google_compute_instance" "backend" {
   }
 
   metadata_startup_script = replace(templatefile("${path.module}/startup-backend.sh.tpl", {
-    artifact_registry_host   = local.artifact_registry_host
-    backend_image            = local.backend_image
-    database_url             = "postgresql://gamba:gamba@${google_compute_address.infra_internal.address}:5432/gamba"
-    redis_url                = "redis://${google_compute_address.infra_internal.address}:6379/0"
-    allowed_origins          = "http://${google_compute_address.infra_public.address}"
-    jwt_secret_key           = var.jwt_secret_key
-    trust_forwarded_ips      = "true"
-    load_shedding_enabled    = "true"
-    max_in_flight_requests   = "100"
-    max_avg_latency_ms       = "1500"
-    latency_shed_probability = "0.7"
-    latency_ewma_alpha       = "0.2"
+    artifact_registry_host      = local.artifact_registry_host
+    backend_image               = local.backend_image
+    database_url                = "postgresql://gamba:gamba@${google_compute_address.infra_internal.address}:5432/gamba"
+    redis_url                   = "redis://${google_compute_address.infra_internal.address}:6379/0"
+    allowed_origins             = "http://${google_compute_address.infra_public.address}"
+    jwt_secret_key              = var.jwt_secret_key
+    trust_forwarded_ips         = "true"
+    load_shedding_enabled       = var.load_shedding_enabled
+    in_flight_soft_limit        = var.in_flight_soft_limit
+    in_flight_hard_limit        = var.in_flight_hard_limit
+    max_avg_latency_ms          = var.max_avg_latency_ms
+    latency_shed_probability    = var.latency_shed_probability
+    latency_ewma_alpha          = var.latency_ewma_alpha
+    max_process_cpu_percent     = var.max_process_cpu_percent
+    cpu_shed_probability        = var.cpu_shed_probability
+    cpu_ewma_alpha              = var.cpu_ewma_alpha
+    cpu_sample_interval_seconds = var.cpu_sample_interval_seconds
+    max_shed_probability        = var.max_shed_probability
   }), "\r\n", "\n")
 
   depends_on = [

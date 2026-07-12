@@ -25,10 +25,16 @@ JWT_SECRET_KEY=${jwt_secret_key}
 ALLOWED_ORIGINS=${allowed_origins}
 TRUST_FORWARDED_IPS=${trust_forwarded_ips}
 LOAD_SHEDDING_ENABLED=${load_shedding_enabled}
-MAX_IN_FLIGHT_REQUESTS=${max_in_flight_requests}
+IN_FLIGHT_SOFT_LIMIT=${in_flight_soft_limit}
+IN_FLIGHT_HARD_LIMIT=${in_flight_hard_limit}
 MAX_AVG_LATENCY_MS=${max_avg_latency_ms}
 LATENCY_SHED_PROBABILITY=${latency_shed_probability}
 LATENCY_EWMA_ALPHA=${latency_ewma_alpha}
+MAX_PROCESS_CPU_PERCENT=${max_process_cpu_percent}
+CPU_SHED_PROBABILITY=${cpu_shed_probability}
+CPU_EWMA_ALPHA=${cpu_ewma_alpha}
+CPU_SAMPLE_INTERVAL_SECONDS=${cpu_sample_interval_seconds}
+MAX_SHED_PROBABILITY=${max_shed_probability}
 EOF
 
 docker pull "$BACKEND_IMAGE"
