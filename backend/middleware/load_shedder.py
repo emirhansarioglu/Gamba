@@ -11,8 +11,8 @@ import metrics
 
 
 LOAD_SHEDDING_ENABLED = os.getenv("LOAD_SHEDDING_ENABLED", "false").lower() == "true"
-MAX_IN_FLIGHT_REQUESTS = int(os.getenv("MAX_IN_FLIGHT_REQUESTS", "100"))
-MAX_AVG_LATENCY_MS = float(os.getenv("MAX_AVG_LATENCY_MS", "1500"))
+MAX_IN_FLIGHT_REQUESTS = int(os.getenv("MAX_IN_FLIGHT_REQUESTS", "200"))
+MAX_AVG_LATENCY_MS = float(os.getenv("MAX_AVG_LATENCY_MS", "1200"))
 LATENCY_SHED_PROBABILITY = float(os.getenv("LATENCY_SHED_PROBABILITY", "0.5"))
 LATENCY_EWMA_ALPHA = float(os.getenv("LATENCY_EWMA_ALPHA", "0.1"))
 BYPASS_PATHS = {"/health", "/metrics"}
@@ -42,7 +42,7 @@ class LoadSheddingMiddleware(BaseHTTPMiddleware):
             if (
                 self._has_latency_sample
                 and self._latency_ewma_ms > MAX_AVG_LATENCY_MS
-                and random.random() < LATENCY_SHED_PROBABILITY
+                and random.random() < LATENCY_SHED_PROBABILITY * (self._latency_ewma_ms / MAX_AVG_LATENCY_MS)
             ):
                 metrics.load_shed.labels("latency").inc()
                 return JSONResponse(
