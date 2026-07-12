@@ -16,7 +16,7 @@ Gamba is a web-only sports venue booking application. Players can browse and joi
 | 3 | Overload mitigation (no library) | Hand-rolled **token bucket rate limiter** in `middleware/rate_limiter.py` — no library used |
 | 4a | Additional strategy 1 | **Redis read-through cache** on `GET /events`, 30s TTL, invalidated on writes |
 | 4b | Additional strategy 2 | **Prometheus observability** — `/metrics` endpoint with request counters, latency histograms, cache hit/miss counters |
-| Bonus | Vertical scaling evaluation | Re-run load tests on the default `e2-micro` vs `e2-standard-2` for 1/3/5 node configs |
+| Bonus | Vertical scaling evaluation | Re-run load tests on baseline `e2-standard-2` vs scaled-up `e2-standard-4` for 1/3/5 node configs |
 
 ---
 
@@ -367,30 +367,48 @@ The deployment script accepts:
 scripts/deploy.sh <project_id> [backend_node_count] [machine_type] [image_tag]
 ```
 
-Use `backend_node_count` values `1`, `3`, or `5` for the assignment measurements. For final performance runs, prefer a stable machine type such as `e2-standard-2`; `e2-micro` is useful for a cheap smoke test but is too noisy for benchmark graphs.
+Use `backend_node_count` values `1`, `3`, or `5` for the assignment measurements. The baseline benchmark runs use `e2-standard-2`. For the optional vertical-scaling comparison, repeat the same 1 / 3 / 5 node runs with the larger `e2-standard-4` machine type. `e2-micro` is useful for a cheap smoke test but is too noisy for benchmark graphs.
 
 ```bash
-# 1 backend node
+# Baseline: 1 backend node on e2-standard-2
 bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 1 e2-standard-2 perf
 
-# 3 backend nodes
+# Baseline: 3 backend nodes on e2-standard-2
 bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-standard-2 perf
 
-# 5 backend nodes
+# Baseline: 5 backend nodes on e2-standard-2
 bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 5 e2-standard-2 perf
+
+# Scaled-up comparison: 1 backend node on e2-standard-4
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 1 e2-standard-4 perf
+
+# Scaled-up comparison: 3 backend nodes on e2-standard-4
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-standard-4 perf
+
+# Scaled-up comparison: 5 backend nodes on e2-standard-4
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 5 e2-standard-4 perf
 ```
 
 On Windows PowerShell, run the same script through Git Bash:
 
 ```powershell
-# 1 backend node
+# Baseline: 1 backend node on e2-standard-2
 & "C:\Program Files\Git\bin\bash.exe" .\scripts\deploy.sh YOUR_GCP_PROJECT_ID 1 e2-standard-2 perf
 
-# 3 backend nodes
+# Baseline: 3 backend nodes on e2-standard-2
 & "C:\Program Files\Git\bin\bash.exe" .\scripts\deploy.sh YOUR_GCP_PROJECT_ID 3 e2-standard-2 perf
 
-# 5 backend nodes
+# Baseline: 5 backend nodes on e2-standard-2
 & "C:\Program Files\Git\bin\bash.exe" .\scripts\deploy.sh YOUR_GCP_PROJECT_ID 5 e2-standard-2 perf
+
+# Scaled-up comparison: 1 backend node on e2-standard-4
+& "C:\Program Files\Git\bin\bash.exe" .\scripts\deploy.sh YOUR_GCP_PROJECT_ID 1 e2-standard-4 perf
+
+# Scaled-up comparison: 3 backend nodes on e2-standard-4
+& "C:\Program Files\Git\bin\bash.exe" .\scripts\deploy.sh YOUR_GCP_PROJECT_ID 3 e2-standard-4 perf
+
+# Scaled-up comparison: 5 backend nodes on e2-standard-4
+& "C:\Program Files\Git\bin\bash.exe" .\scripts\deploy.sh YOUR_GCP_PROJECT_ID 5 e2-standard-4 perf
 ```
 
 The script does:
@@ -408,7 +426,7 @@ The deploy script also selects node-count-specific load-shedding defaults in `sc
 configure_load_shedding()
 ```
 
-Those values are passed to Terraform and written into each backend VM's environment. If you want to tune `IN_FLIGHT_SOFT_LIMIT`, `IN_FLIGHT_HARD_LIMIT`, latency, CPU, or `MAX_SHED_PROBABILITY` for GCP, update the matching `1)`, `3)`, or `5)` block in `scripts/deploy.sh`. If you run the local load-test stack, update the same block in `scripts/loadtest_stack.sh`.
+Those values are passed to Terraform and written into each backend VM's environment. If you want to tune `IN_FLIGHT_SOFT_LIMIT`, `IN_FLIGHT_HARD_LIMIT`, latency, CPU, or `MAX_SHED_PROBABILITY` for GCP, update the matching node-count block in `scripts/deploy.sh`. The deploy script also has explicit `e2-standard-4:1`, `e2-standard-4:3`, and `e2-standard-4:5` cases for the scaled-up machine comparison. If you run the local load-test stack, update the same node-count block in `scripts/loadtest_stack.sh`.
 
 Terraform creates:
 - 1 `infra` VM (public IP) — runs Nginx (also handling frontend assets), PostgreSQL and Redis.
@@ -452,8 +470,8 @@ Terraform computes the diff and creates or destroys only the affected `backend-*
 **Scaling up/down (vertical)** changes the VM size for all nodes via the `machine_type` variable:
 
 ```bash
-bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-standard-2 perf   # up
-bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-micro dev         # down
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-standard-4 perf   # up from baseline e2-standard-2
+bash scripts/deploy.sh YOUR_GCP_PROJECT_ID 3 e2-standard-2 perf   # down to baseline
 ```
 
 Changing the machine type recreates the VMs, so unlike horizontal scaling this implies downtime for the affected tier.
@@ -517,23 +535,36 @@ The script also emits custom failure counters:
 
 After each deploy, copy the printed `App:` URL or set `LB_IP` manually.
 
-For comparable 1 / 3 / 5 node measurements, keep the same machine type and use a distinct `RUN_ID` per node count:
+For comparable 1 / 3 / 5 node measurements, keep the same machine type and use a distinct `RUN_ID` per node count. The baseline benchmark set uses `e2-standard-2`:
 
 ```bash
 # 1 backend node
-k6 run -e BASE_URL=http://$LB_IP -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=gcp1_e2standard2 scripts/load_test.js
+k6 run -e BASE_URL=http://$LB_IP -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=100 -e RUN_ID=gcp1_e2-standard-2_perf scripts/load_test.js
 
 # 3 backend nodes
-k6 run -e BASE_URL=http://$LB_IP -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=gcp3_e2standard2 scripts/load_test.js
+k6 run -e BASE_URL=http://$LB_IP -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=100 -e RUN_ID=gcp3_e2-standard-2_perf scripts/load_test.js
 
 # 5 backend nodes
-k6 run -e BASE_URL=http://$LB_IP -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=gcp5_e2standard2 scripts/load_test.js
+k6 run -e BASE_URL=http://$LB_IP -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=100 -e RUN_ID=gcp5_e2-standard-2_perf scripts/load_test.js
+```
+
+For the scaled-up comparison, repeat the same load tests after deploying `e2-standard-4`:
+
+```bash
+# 1 backend node, scaled-up machine
+k6 run -e BASE_URL=http://$LB_IP -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=100 -e RUN_ID=gcp1_e2-standard-4_perf scripts/load_test.js
+
+# 3 backend nodes, scaled-up machine
+k6 run -e BASE_URL=http://$LB_IP -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=100 -e RUN_ID=gcp3_e2-standard-4_perf scripts/load_test.js
+
+# 5 backend nodes, scaled-up machine
+k6 run -e BASE_URL=http://$LB_IP -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=100 -e RUN_ID=gcp5_e2-standard-4_perf scripts/load_test.js
 ```
 
 PowerShell example using the printed deployment URL:
 
 ```powershell
-k6 run -e BASE_URL=http://34.179.226.113 -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=25 -e RUN_ID=gcp3_e2standard2 scripts/load_test.js
+k6 run -e BASE_URL=http://34.179.226.113 -e TARGET_VUS=1000 -e AUTH_USERS=1000 -e AUTH_SETUP_BATCH_SIZE=100 -e RUN_ID=gcp3_e2-standard-2_perf scripts/load_test.js
 ```
 
 Reuse the same `RUN_ID` when repeating the same benchmark. Existing users are logged in first, so setup avoids repeated duplicate-registration `400` responses. Use a new `RUN_ID` only when you intentionally want a fresh user set.
@@ -541,7 +572,7 @@ Reuse the same `RUN_ID` when repeating the same benchmark. Existing users are lo
 If setup is too slow, increase:
 
 ```bash
--e AUTH_SETUP_BATCH_SIZE=50
+-e AUTH_SETUP_BATCH_SIZE=150
 ```
 
 If setup starts producing `EOF`, connection resets, or high auth failures, reduce it:
